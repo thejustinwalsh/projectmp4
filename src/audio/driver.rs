@@ -22,14 +22,17 @@ pub enum DriverKind {
 #[derive(Debug, Clone)]
 pub struct Driver {
     pub kind: DriverKind,
-    /// Interleaved stereo f32 at `rate`.
-    pub pcm: Vec<f32>,
     pub rate: u32,
+    /// Interleaved stereo f32 at `rate`, followed by `MAX_WINDOW_FRAMES * 2`
+    /// zeros. Private: the tail is padding, not signal. Use `samples()`.
+    pcm: Vec<f32>,
+    /// True length in stereo frames, excluding the padding.
+    frames: usize,
 }
 
-/// Longest window `window` can return as pure silence (frames).
-const MAX_SILENT_FRAMES: usize = 1 << 16;
-static SILENCE: [f32; MAX_SILENT_FRAMES * 2] = [0.0; MAX_SILENT_FRAMES * 2];
+/// Largest `frames` `window` honours; larger requests are clamped to it. Also
+/// the length of the zero tail appended to the buffer at load.
+pub const MAX_WINDOW_FRAMES: usize = 1 << 16;
 
 fn default_cache_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
@@ -37,6 +40,23 @@ fn default_cache_dir() -> Option<PathBuf> {
 }
 
 impl Driver {
+    fn new(kind: DriverKind, mut pcm: Vec<f32>) -> Driver {
+        let frames = pcm.len() / 2;
+        pcm.truncate(frames * 2);
+        pcm.resize(frames * 2 + MAX_WINDOW_FRAMES * 2, 0.0);
+        Driver { kind, rate: PIPELINE_RATE, pcm, frames }
+    }
+
+    /// True length in stereo frames (padding excluded).
+    pub fn frames(&self) -> usize {
+        self.frames
+    }
+
+    /// The decoded signal, interleaved stereo, without the zero padding.
+    pub fn samples(&self) -> &[f32] {
+        &self.pcm[..self.frames * 2]
+    }
+
     /// `want = None` prefers stems and falls back to the mix; `Some(Mix)`
     /// forces the mix; `Some(Stems)` is the same as `None`.
     pub fn load(src: &Source, want: Option<DriverKind>) -> Result<Driver> {
@@ -56,30 +76,26 @@ impl Driver {
             if let Some(paths) = find_stems(&src.sha256, cache_dir) {
                 // An unreadable stem is a miss, not an error.
                 if let Some(pcm) = sum_stems(&paths) {
-                    return Ok(Driver { kind: DriverKind::Stems, pcm, rate: PIPELINE_RATE });
+                    return Ok(Driver::new(DriverKind::Stems, pcm));
                 }
             }
         }
         load_mix(src)
     }
 
-    /// `frames` stereo frames starting at `t` seconds, as interleaved samples.
-    /// Wholly outside the track (or non-finite/negative `t`) yields silence of
-    /// the requested length (capped at 65536 frames). A window straddling the
-    /// end is clipped to the track: shorter than requested, never padded.
+    /// Exactly `min(frames, MAX_WINDOW_FRAMES) * 2` interleaved samples
+    /// starting at `t` seconds, for every `t` and `frames`. `frames` is clamped
+    /// to `MAX_WINDOW_FRAMES`. Any part of the window outside the track
+    /// (negative, NaN, infinite or past-the-end `t`, or a straddling window)
+    /// is zeros; this never panics.
     pub fn window(&self, t: f64, frames: usize) -> &[f32] {
-        let silent = &SILENCE[..frames.min(MAX_SILENT_FRAMES) * 2];
-        if !t.is_finite() || t < 0.0 {
-            return silent;
-        }
-        let start = (t * self.rate as f64) as u128 * 2;
-        let len = self.pcm.len() as u128;
-        if start >= len {
-            return silent;
-        }
-        let start = start as usize;
-        let end = (start + frames.saturating_mul(2)).min(self.pcm.len());
-        &self.pcm[start..end]
+        let n = frames.min(MAX_WINDOW_FRAMES) * 2;
+        let end = self.frames * 2;
+        // Compare as f64 before any cast that could saturate.
+        let pos = t * self.rate as f64;
+        let start = if pos >= 0.0 && pos < self.frames as f64 { pos as usize * 2 } else { end };
+        // start <= end, so start + n <= end + MAX_WINDOW_FRAMES * 2 == pcm.len().
+        &self.pcm[start..start + n]
     }
 }
 
@@ -90,11 +106,11 @@ fn load_mix(src: &Source) -> Result<Driver> {
         Ok(())
     })
     .map_err(|e| Error::msg(format!("cannot decode {}: {e}", src.wav.display())))?;
-    Ok(Driver { kind: DriverKind::Mix, pcm, rate: PIPELINE_RATE })
+    Ok(Driver::new(DriverKind::Mix, pcm))
 }
 
 /// Absolute paths of the drums and bass stems, if a complete, matching bundle exists.
-fn find_stems(sha256: &str, cache_dir: &Path) -> Option<[PathBuf; 2]> {
+fn find_stems(sha256: &str, cache_dir: &Path) -> Option<[(PathBuf, u64); 2]> {
     let stems = cache_dir.join("stems");
     let req: Value =
         serde_json::from_slice(&std::fs::read(stems.join("requests").join(format!("{sha256}.json"))).ok()?)
@@ -111,28 +127,36 @@ fn find_stems(sha256: &str, cache_dir: &Path) -> Option<[PathBuf; 2]> {
     if m.get("completion")?.as_str()? != "complete" || m.get("sourceSha256")?.as_str()? != sha256 {
         return None;
     }
-    let role = |name: &str| -> Option<PathBuf> {
+    let role = |name: &str| -> Option<(PathBuf, u64)> {
         let s = m.get("stems")?.as_array()?.iter().find(|s| s.get("role").and_then(Value::as_str) == Some(name))?;
         let ok = s.get("sampleRate")?.as_u64()? == PIPELINE_RATE as u64
             && s.get("channels")?.as_u64()? == 2;
         let p = PathBuf::from(s.get("path")?.as_str()?);
-        (ok && p.is_absolute()).then_some(p)
+        let frames = s.get("frames")?.as_u64()?;
+        (ok && p.is_absolute()).then_some((p, frames))
     };
     Some([role("drums")?, role("bass")?])
 }
 
 /// Streams drums into one buffer and adds bass into it in place, so peak
-/// memory is a single decoded stem plus one packet. Clamps to [-1, 1]. If the
-/// stems differ in length the sum covers the shorter.
-fn sum_stems(paths: &[PathBuf; 2]) -> Option<Vec<f32>> {
+/// memory is a single decoded stem plus one packet. Clamps to [-1, 1]. Each
+/// decoded length must equal its manifest `frames` (else a miss: a truncated
+/// file must not pass as the whole track). If the stems nonetheless differ in
+/// length, the sum covers the shorter, with a warning in either direction.
+fn sum_stems(stems: &[(PathBuf, u64); 2]) -> Option<Vec<f32>> {
     let mut pcm: Vec<f32> = Vec::new();
-    deck_media_codec::visit_stereo(&paths[0], |f| {
+    deck_media_codec::visit_stereo(&stems[0].0, |f| {
         pcm.extend_from_slice(f);
         Ok(())
     })
     .ok()?;
+    if (pcm.len() / 2) as u64 != stems[0].1 {
+        return None;
+    }
     let mut pos = 0usize;
-    deck_media_codec::visit_stereo(&paths[1], |f| {
+    let mut bass_len = 0usize;
+    deck_media_codec::visit_stereo(&stems[1].0, |f| {
+        bass_len += f.len();
         let n = f.len().min(pcm.len() - pos);
         for (d, b) in pcm[pos..pos + n].iter_mut().zip(f) {
             *d = (*d + *b).clamp(-1.0, 1.0);
@@ -141,8 +165,14 @@ fn sum_stems(paths: &[PathBuf; 2]) -> Option<Vec<f32>> {
         Ok(())
     })
     .ok()?;
-    if pos < pcm.len() {
-        eprintln!("driver: bass stem shorter than drums ({pos} < {} samples); truncating", pcm.len());
+    if (bass_len / 2) as u64 != stems[1].1 {
+        return None;
+    }
+    if bass_len != pcm.len() {
+        eprintln!(
+            "driver: stem lengths differ (drums {} vs bass {bass_len} samples); truncating to the shorter",
+            pcm.len()
+        );
         pcm.truncate(pos);
     }
     (!pcm.is_empty()).then_some(pcm)
