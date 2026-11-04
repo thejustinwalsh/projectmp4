@@ -60,11 +60,23 @@ size and not look like a stock font. Designing it is in scope (§7).
    timeline, preset sequence, frame count and duration, dumpable as JSON with `--dump-plan`.
 
    **Pixel-exact determinism is not achievable and is not a goal.** Discovered during Task 2 by a
-   negative-control test: libprojectM seeds two RNGs we cannot reach from the C API —
-   `MilkdropPreset/PresetState.cpp:21-23` seeds `hueRandomOffsets` from `std::random_device`, and
-   `Renderer/MilkdropNoise.cpp:56` seeds noise textures from `system_clock::now()`. Measured, two
-   renders of the *same* preset with a pinned frame clock differ in ~28% of pixels.
+   negative-control test, then confirmed against the vendored source. libprojectM seeds **four**
+   RNG sites we cannot reach from the C API, none of which takes a seed parameter:
+
+   | Site | Seeded from |
+   |---|---|
+   | `MilkdropPreset/PresetState.cpp:21-28` — `hueRandomOffsets`, per preset instance | `std::random_device` |
+   | `Renderer/MilkdropNoise.cpp:56` — 2D noise textures | `system_clock::now()` |
+   | `Renderer/MilkdropNoise.cpp:143` — 3D noise textures | `system_clock::now()` |
+   | `MilkdropPreset/MilkdropShader.cpp:24` — `floatRand` | global `rand()` |
+
+   Measured: two renders of the *same* preset with a pinned frame clock differ in ~28% of pixels.
    `projectm_set_frame_time` does not change this.
+
+   **Use lit-pixel fraction, not pixel diffs, for any frame assertion.** The hue RNG's entire
+   reachable effect on a frame is a smooth global per-channel multiplier in `[0.667, 1.0]` — it
+   can only darken, and `0 × anything = 0` leaves black pixels untouched. So lit fraction is
+   stable to ±0.2pp across runs while pixel diffs are maximally sensitive to exactly that tint.
 
    Consequence, binding on every task: **never compare frames by equality or by a difference
    threshold.** Frame assertions must test properties (is it black, how much of it is lit) rather
