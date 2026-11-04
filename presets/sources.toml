@@ -1,0 +1,17 @@
+# Preset packs fetched by `projectmp4 init`, pinned to exact commits so a
+# render is reproducible. Resolved with `git ls-remote <repo> HEAD`.
+
+[[source]]
+name = "presets-cream-of-the-crop"
+repo = "https://github.com/projectM-visualizer/presets-cream-of-the-crop"
+commit = "0180df21f5e0bd39b9060cc5de420ed2f1f9e509"
+
+[[source]]
+name = "presets-projectm-classic"
+repo = "https://github.com/projectM-visualizer/presets-projectm-classic"
+commit = "14a6244a7d32eb7e114e1a92d1cb93358cdcc54a"
+
+[[source]]
+name = "presets-milkdrop-texture-pack"
+repo = "https://github.com/projectM-visualizer/presets-milkdrop-texture-pack"
+commit = "6368812f27bc747b517218fbf89d21d59afce4d9"
