@@ -67,10 +67,24 @@ fn times(v: &Value, key: &str) -> Option<Vec<f64>> {
 
 /// One parser for both the cache entry and a fresh `analyze` result.
 fn parse(v: &Value, from_cache: bool) -> Option<Analysis> {
-    let beats = times(v, "beats")?;
-    let downbeats = times(v, "downbeats")?;
+    let mut beats = times(v, "beats")?;
+    let mut downbeats = times(v, "downbeats")?;
     let duration = v.get("duration")?.as_f64().filter(|d| *d > 0.0)?;
+    if !from_cache {
+        // A fresh result is put in order rather than rejected; a cache entry
+        // is untrusted and must already be ordered, else it is a miss.
+        for t in [&mut beats, &mut downbeats] {
+            t.sort_by(|a, b| a.total_cmp(b));
+            t.dedup();
+        }
+    }
     if beats.is_empty() || downbeats.is_empty() {
+        return None;
+    }
+    // Consumers (preset switching) rely on a strictly ascending grid that
+    // lies inside the track.
+    let ascending = |t: &[f64]| t.windows(2).all(|w| w[1] > w[0]);
+    if !ascending(&beats) || !ascending(&downbeats) || downbeats.iter().any(|d| *d >= duration) {
         return None;
     }
     let mut bpm = v.get("bpm")?.as_f64()? as f32;
@@ -86,4 +100,33 @@ fn parse(v: &Value, from_cache: bool) -> Option<Analysis> {
         bpm = (60.0 / median) as f32;
     }
     Some(Analysis { bpm, beats, downbeats, duration, from_cache })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn zero_bpm_is_taken_from_median_beat_gap() {
+        let beats: Vec<f64> = (0..8).map(|i| i as f64 * 0.5).collect();
+        let v = json!({"bpm": 0.0, "beats": beats, "downbeats": [0.0, 2.0], "duration": 10.0});
+        let a = parse(&v, true).unwrap();
+        assert!((a.bpm - 120.0).abs() < 1e-3, "bpm was {}", a.bpm);
+    }
+
+    #[test]
+    fn zero_bpm_with_under_two_beats_is_rejected() {
+        let v = json!({"bpm": 0.0, "beats": [1.0], "downbeats": [1.0], "duration": 10.0});
+        assert!(parse(&v, true).is_none());
+    }
+
+    #[test]
+    fn fresh_result_is_sorted_cache_entry_is_rejected() {
+        let v = json!({"bpm": 120.0, "beats": [0.5, 0.0, 1.0], "downbeats": [2.0, 0.0], "duration": 10.0});
+        let a = parse(&v, false).unwrap();
+        assert_eq!(a.beats, vec![0.0, 0.5, 1.0]);
+        assert_eq!(a.downbeats, vec![0.0, 2.0]);
+        assert!(parse(&v, true).is_none());
+    }
 }
