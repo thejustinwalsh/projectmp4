@@ -450,10 +450,14 @@ impl GlContext {
 
     /// Creates a libprojectM instance bound to this context.
     ///
-    /// The returned `Instance` borrows `self`, so the borrow checker refuses
-    /// any arrangement that would drop the context first. That rules out
-    /// holding both in one struct by value; hold the context one level up and
-    /// borrow it:
+    /// The returned `Instance` keeps a reference to `self`, which does two
+    /// jobs: the borrow checker refuses any arrangement that would drop the
+    /// context first, and the instance's `Drop` re-makes the context current
+    /// before `projectm_destroy`, so tearing down some other context in
+    /// between cannot leave projectM's `glDelete*` calls with no context.
+    ///
+    /// That rules out holding both in one struct by value; hold the context
+    /// one level up and borrow it:
     ///
     /// ```ignore
     /// struct Renderer<'gl> {
@@ -463,7 +467,7 @@ impl GlContext {
     /// ```
     pub fn create_instance(&self) -> Result<Instance<'_>> {
         self.ensure_current()?;
-        Instance::new(self.loader())
+        Instance::new(self)
     }
 
     /// `GL_VERSION` and `GL_RENDERER` of the live context, for diagnostics.

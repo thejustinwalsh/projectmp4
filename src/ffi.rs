@@ -13,9 +13,10 @@ mod sys {
 
 use std::borrow::Cow;
 use std::ffi::{c_char, c_void, CString};
-use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::gl_context::GlContext;
 
 /// OpenGL symbol loader: given a NUL-terminated name, returns the function pointer.
 pub type LoadProc = unsafe extern "C" fn(name: *const c_char, user: *mut c_void) -> *mut c_void;
@@ -95,16 +96,20 @@ impl Channels {
 ///   that closes over per-context state and `Instance` becomes a true
 ///   per-process singleton.
 /// - Holds a raw pointer, so it is `!Send` and `!Sync`.
-/// - The `'gl` lifetime borrows the [`crate::gl_context::GlContext`] this
-///   instance was created against, so the context cannot be dropped first.
-///   Construct one with `GlContext::create_instance`, not directly.
+/// - The borrow of the [`GlContext`] this instance was created against does
+///   double duty: it stops the context being dropped first, *and* it lets
+///   `Drop` make the context current again before `projectm_destroy`. Drop
+///   order alone is not enough, because tearing down some *other* `GlContext`
+///   in between leaves no context current at all, and projectM's `glDelete*`
+///   calls then silently become no-ops that leak GPU objects.
+///   Construct one with [`GlContext::create_instance`], not directly.
 pub struct Instance<'gl> {
     handle: sys::projectm_handle,
+    gl: &'gl GlContext,
     /// Bumped by [`on_preset_switch_failed`]. Boxed so its address is stable
     /// across moves of the `Instance`; projectM holds that address as the
     /// callback's user data for the life of the instance.
     load_failures: Box<AtomicU64>,
-    _gl: PhantomData<&'gl ()>,
 }
 
 /// projectM calls this synchronously from inside `projectm_load_preset_file`
@@ -126,13 +131,12 @@ unsafe extern "C" fn on_preset_switch_failed(
 }
 
 impl<'gl> Instance<'gl> {
-    /// `'gl` is unconstrained by the arguments, so the caller chooses it.
-    /// `GlContext::create_instance` is the only caller and pins it to its own
-    /// `&self`, which is what makes the drop-order invariant a compile error
-    /// instead of a comment.
-    pub(crate) fn new(load_proc: LoadProc) -> Result<Instance<'gl>> {
+    /// [`GlContext::create_instance`] is the only caller; it has already made
+    /// `gl` current. Holding the reference is what turns the context-currency
+    /// invariant from a comment into something the type system carries.
+    pub(crate) fn new(gl: &'gl GlContext) -> Result<Instance<'gl>> {
         let handle = unsafe {
-            sys::projectm_create_with_opengl_load_proc(Some(load_proc), std::ptr::null_mut())
+            sys::projectm_create_with_opengl_load_proc(Some(gl.loader()), std::ptr::null_mut())
         };
         if handle.is_null() {
             Err(Error::msg(
@@ -149,8 +153,8 @@ impl<'gl> Instance<'gl> {
             };
             Ok(Instance {
                 handle,
+                gl,
                 load_failures,
-                _gl: PhantomData,
             })
         }
     }
@@ -235,10 +239,12 @@ impl<'gl> Instance<'gl> {
     }
 }
 
-/// Destroys the instance. The GL context that was current at creation must be
-/// current here, or GL resource deletion is undefined.
+/// Destroys the instance, re-making its context current first: something else
+/// may have changed or cleared currency since the last render, and
+/// `projectm_destroy` frees GL resources.
 impl Drop for Instance<'_> {
     fn drop(&mut self) {
+        let _ = self.gl.make_current();
         unsafe { sys::projectm_destroy(self.handle) };
     }
 }
