@@ -14,7 +14,12 @@ path = "src/lib.rs"
 [dependencies]
 sha2 = "0.10"
 serde_json = "1"
+deck-track-analysis = { path = "/Users/tjw/Developer/agent-deck/native/track-analysis" }
 
 [build-dependencies]
 cmake = "0.1"
 bindgen = "0.71"
+
+# Beat-this ONNX inference is unusably slow unoptimised (>14 min for one track).
+[profile.dev.package."*"]
+opt-level = 3
