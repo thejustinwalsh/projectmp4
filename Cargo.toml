@@ -14,6 +14,10 @@ path = "src/lib.rs"
 [dependencies]
 sha2 = "0.10"
 serde_json = "1"
+anyhow = "1"
+resvg = { version = "0.49", default-features = false }
+cosmic-text = "0.19"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 deck-track-analysis = { path = "/Users/tjw/Developer/agent-deck/native/track-analysis" }
 deck-media-codec = { path = "/Users/tjw/Developer/agent-deck/native/media-codec" }
 
@@ -25,5 +29,3 @@ bindgen = "0.71"
 [profile.dev.package."*"]
 opt-level = 3
 
-[dev-dependencies]
-resvg = { version = "0.49", default-features = false }
