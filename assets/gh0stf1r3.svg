@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 5430 1000">
+  <title>GH0STF1R3</title>
+  <!--
+    The GH0STF1R3 mark. Single colour: every form is currentColor, so the
+    caller picks the ink. No gradients. No halo baked in - the dark halo that
+    keeps the mark readable over bright visuals is a compositing-time layer,
+    not part of the asset.
+
+    Cap height is 1000 units. The drawing is authored on a 100-unit cap with a
+    14-unit monoline, scaled by 10 here, so the stroke is 140 units = 14% of
+    cap. That weight is set by the legibility floor, not by taste: at the 28px
+    cap height this is watermarked at, it renders 3.9px, which is what survives
+    white-on-bright. A lighter line vanished in testing.
+  -->
+  <defs>
+    <g id="art-scale" transform="scale(10)">
+      <g id="word-art" fill="none" stroke="currentColor" stroke-width="14"
+       stroke-linecap="round" stroke-linejoin="round">
+      <g transform="translate(0,0)"><!-- G -->
+        <path d="M40,29 C40,16 32,7 24,7 C15,7 7,16 7,29 V71 C7,84 15,93 24,93 C32,93 40,84 40,71 V57 H27"/>
+      </g>
+      <g transform="translate(62,0)"><!-- H -->
+        <path d="M7,7 V93 M40,7 V93 M7,50 H40"/>
+      </g>
+      <g transform="translate(124,0)"><!-- 0, slashed: the leet is drawn, not typed -->
+        <path d="M24,7 C32,7 40,16 40,29 V71 C40,84 32,93 24,93 C15,93 7,84 7,71 V29 C7,16 15,7 24,7 Z"/>
+        <path d="M36,21 L11,79"/>
+      </g>
+      <g transform="translate(186,0)"><!-- S -->
+        <path d="M40,28 C40,16 33,7 24,7 C15,7 7,15 7,26 C7,37 14,45 24,48 C33,51 40,59 40,71 C40,84 33,93 24,93 C15,93 7,85 7,74"/>
+      </g>
+      <g transform="translate(248,0)"><!-- T -->
+        <path d="M7,7 H40 M24,7 V93"/>
+      </g>
+      <g transform="translate(310,0)"><!-- F -->
+        <path d="M7,93 V7 H40 M7,50 H34"/>
+      </g>
+      <g transform="translate(372,0)"><!-- 1, flag-less: a bare stem, per the spec -->
+        <path d="M24,7 V93 M15,93 H33"/>
+      </g>
+      <g transform="translate(434,0)"><!-- R -->
+        <path d="M7,93 V7 H24 C33,7 40,16 40,28 C40,40 33,49 24,49 H7"/>
+        <path d="M25,49 L40,93"/>
+      </g>
+      <g transform="translate(496,0)"><!-- 3 -->
+        <path d="M7,19 C7,12 15,7 24,7 C33,7 40,15 40,27 C40,39 33,46 24,49 C33,52 40,59 40,71 C40,84 33,93 24,93 C15,93 7,88 7,81"/>
+      </g>
+    </g>
+      <g id="sigil-art">
+      <path fill="currentColor" fill-rule="evenodd" d="
+        M54,-10 C50,16 68,32 68,60 C68,78 64,91 62,102
+        Q51,122 40.5,102 Q30,122 19.5,102 Q9,122 2,102
+        C0,84 1,62 7,48 C16,28 42,22 54,-10 Z
+        M18,52 a8,8 0 0 1 16,0 v16 a8,8 0 0 1 -16,0 z
+        M40,52 a8,8 0 0 1 16,0 v16 a8,8 0 0 1 -16,0 z"/>
+    </g>
+    </g>
+  </defs>
+
+  <!-- GH0STF1R3 wordmark. The 0 carries a diagonal cut and the 1 a short foot,
+       so the leetspeak reads as drawn rather than mistyped. -->
+  <symbol id="word" viewBox="0 0 5430 1000" overflow="visible">
+    <g transform="scale(10)"><g id="word-art" fill="none" stroke="currentColor" stroke-width="14"
+       stroke-linecap="round" stroke-linejoin="round">
+      <g transform="translate(0,0)"><!-- G -->
+        <path d="M40,29 C40,16 32,7 24,7 C15,7 7,16 7,29 V71 C7,84 15,93 24,93 C32,93 40,84 40,71 V57 H27"/>
+      </g>
+      <g transform="translate(62,0)"><!-- H -->
+        <path d="M7,7 V93 M40,7 V93 M7,50 H40"/>
+      </g>
+      <g transform="translate(124,0)"><!-- 0, slashed: the leet is drawn, not typed -->
+        <path d="M24,7 C32,7 40,16 40,29 V71 C40,84 32,93 24,93 C15,93 7,84 7,71 V29 C7,16 15,7 24,7 Z"/>
+        <path d="M36,21 L11,79"/>
+      </g>
+      <g transform="translate(186,0)"><!-- S -->
+        <path d="M40,28 C40,16 33,7 24,7 C15,7 7,15 7,26 C7,37 14,45 24,48 C33,51 40,59 40,71 C40,84 33,93 24,93 C15,93 7,85 7,74"/>
+      </g>
+      <g transform="translate(248,0)"><!-- T -->
+        <path d="M7,7 H40 M24,7 V93"/>
+      </g>
+      <g transform="translate(310,0)"><!-- F -->
+        <path d="M7,93 V7 H40 M7,50 H34"/>
+      </g>
+      <g transform="translate(372,0)"><!-- 1, flag-less: a bare stem, per the spec -->
+        <path d="M24,7 V93 M15,93 H33"/>
+      </g>
+      <g transform="translate(434,0)"><!-- R -->
+        <path d="M7,93 V7 H24 C33,7 40,16 40,28 C40,40 33,49 24,49 H7"/>
+        <path d="M25,49 L40,93"/>
+      </g>
+      <g transform="translate(496,0)"><!-- 3 -->
+        <path d="M7,19 C7,12 15,7 24,7 C33,7 40,15 40,27 C40,39 33,46 24,49 C33,52 40,59 40,71 C40,84 33,93 24,93 C15,93 7,88 7,81"/>
+      </g>
+    </g></g>
+  </symbol>
+
+  <!-- One closed silhouette: flame from the asymmetry - tip thrown right, high
+       round left shoulder, long tapering flank - and ghost from the scalloped
+       hem and the two voids. Solid, because a solid form is what survives a
+       32px render over moving colour. -->
+  <symbol id="sigil" viewBox="-100 -100 880 1340" overflow="visible">
+    <g transform="scale(10)"><g id="sigil-art">
+      <path fill="currentColor" fill-rule="evenodd" d="
+        M54,-10 C50,16 68,32 68,60 C68,78 64,91 62,102
+        Q51,122 40.5,102 Q30,122 19.5,102 Q9,122 2,102
+        C0,84 1,62 7,48 C16,28 42,22 54,-10 Z
+        M18,52 a8,8 0 0 1 16,0 v16 a8,8 0 0 1 -16,0 z
+        M40,52 a8,8 0 0 1 16,0 v16 a8,8 0 0 1 -16,0 z"/>
+    </g></g>
+  </symbol>
+</svg>
