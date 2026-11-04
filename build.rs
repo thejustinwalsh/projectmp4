@@ -5,6 +5,8 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=vendor/projectm/src");
     println!("cargo:rerun-if-changed=vendor/projectm/CMakeLists.txt");
+    println!("cargo:rerun-if-changed=vendor/projectm/vendor/projectm-eval");
+    println!("cargo:rerun-if-changed=vendor/projectm/vendor/glad");
 
     let dst = cmake::Config::new("vendor/projectm")
         .define("BUILD_SHARED_LIBS", "OFF")
