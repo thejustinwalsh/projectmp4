@@ -13,45 +13,16 @@ pub struct Raster {
 
 /// The `viewBox` of `<symbol id="...">`, or a panic naming the missing id.
 pub fn symbol_viewbox(svg: &str, id: &str) -> [f64; 4] {
-    let needle = format!("<symbol id=\"{id}\"");
-    let start = svg
-        .find(&needle)
-        .unwrap_or_else(|| panic!("symbol id {id:?} does not exist in the SVG"));
-    let tag = &svg[start..svg[start..].find('>').unwrap() + start];
-    let vb = tag
-        .split("viewBox=\"")
-        .nth(1)
-        .unwrap_or_else(|| panic!("symbol {id:?} has no viewBox"))
-        .split('"')
-        .next()
-        .unwrap();
-    let n: Vec<f64> = vb.split_whitespace().map(|v| v.parse().unwrap()).collect();
-    assert_eq!(n.len(), 4, "bad viewBox {vb:?}");
-    [n[0], n[1], n[2], n[3]]
+    projectmp4::render::mark::symbol_viewbox(svg, id).unwrap_or_else(|e| panic!("{}", e.0))
 }
 
-/// Rasterise `<symbol id>` so that 1000 viewBox units (the cap height) span
-/// `cap_px` pixels. Canvas size comes from the symbol's own viewBox.
+/// Rasterise `<symbol id>` through the shipped rasteriser so that 1000 viewBox
+/// units (the cap height) span `cap_px` pixels.
 pub fn render_svg_symbol(path: &str, id: &str, cap_px: u32, ink: &str) -> Raster {
     let svg = std::fs::read_to_string(path).unwrap();
-    let [vx, vy, vw, vh] = symbol_viewbox(&svg, id);
-    let scale = cap_px as f64 / 1000.0;
-    let (w, h) = ((vw * scale).round() as u32, (vh * scale).round() as u32);
-
-    let root_end = svg.find('>').unwrap();
-    assert!(svg.starts_with("<svg"), "unexpected root");
-    let body_end = svg.rfind("</svg>").unwrap();
-    let doc = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{vw}\" height=\"{vh}\" \
-         viewBox=\"{vx} {vy} {vw} {vh}\" color=\"{ink}\">{}<use href=\"#{id}\" x=\"{vx}\" y=\"{vy}\" \
-         width=\"{vw}\" height=\"{vh}\"/></svg>",
-        &svg[root_end + 1..body_end]
-    );
-
-    let tree = resvg::usvg::Tree::from_str(&doc, &resvg::usvg::Options::default()).unwrap();
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h).unwrap();
-    let t = resvg::tiny_skia::Transform::from_scale(w as f32 / vw as f32, h as f32 / vh as f32);
-    resvg::render(&tree, t, &mut pixmap.as_mut());
+    let pixmap = projectmp4::render::mark::rasterise_symbol(&svg, id, cap_px as f32, ink)
+        .unwrap_or_else(|e| panic!("{}", e.0));
+    let (w, h) = (pixmap.width(), pixmap.height());
     let px = pixmap.data().chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
     Raster { w, h, px, pixmap }
 }

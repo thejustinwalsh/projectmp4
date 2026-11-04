@@ -10,7 +10,8 @@
 //! Every tile is anchored with its padded corner on the 64 px safe margin, and
 //! padding is at least the halo radius, so no layer reaches the margin.
 
-use anyhow::{anyhow, Context, Result};
+use super::mark::rasterise_symbol;
+use crate::ffi::{Error, Result};
 use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache, Weight};
 use std::path::Path;
 
@@ -26,8 +27,9 @@ const SIGIL_CAP_PX: f32 = 48.0;
 const HALO_RADIUS: usize = 6;
 const HALO_PAD: usize = 10;
 const SCALE_LEVELS: usize = 16;
-const BLOCK_PAD: usize = 24;
+pub const BLOCK_PAD: usize = 24;
 const BLOCK_GAP: usize = 20;
+const MAX_TEXT_CHARS: usize = 200;
 const TEXT_MAX_W: f32 = 640.0;
 const SCRIM_FEATHER: f32 = 20.0;
 const SCRIM_ALPHA: f32 = 0.6;
@@ -141,36 +143,12 @@ fn with_halo(ink: &Tile) -> Tile {
     out
 }
 
-/// Parse `viewBox` of `<symbol id>`.
-fn symbol_viewbox(svg: &str, id: &str) -> Result<[f64; 4]> {
-    let start = svg.find(&format!("<symbol id=\"{id}\"")).ok_or_else(|| anyhow!("no symbol {id}"))?;
-    let tag = &svg[start..svg[start..].find('>').ok_or_else(|| anyhow!("unterminated symbol tag"))? + start];
-    let vb = tag.split("viewBox=\"").nth(1).and_then(|s| s.split('"').next()).ok_or_else(|| anyhow!("no viewBox"))?;
-    let n: Vec<f64> = vb.split_whitespace().filter_map(|v| v.parse().ok()).collect();
-    if n.len() != 4 {
-        return Err(anyhow!("bad viewBox {vb:?}"));
-    }
-    Ok([n[0], n[1], n[2], n[3]])
-}
-
 /// Rasterise a symbol in white so 1000 units = `cap_px`, with a `HALO_PAD`
-/// empty border, then add the halo. Canvas aspect follows the symbol viewBox.
+/// empty border, then add the halo.
 fn render_mark(id: &str, cap_px: f32) -> Result<Tile> {
-    let [vx, vy, vw, vh] = symbol_viewbox(MARK_SVG, id)?;
-    let k = cap_px as f64 / 1000.0;
-    let (iw, ih) = ((vw * k).round() as usize, (vh * k).round() as usize);
+    let inner = rasterise_symbol(MARK_SVG, id, cap_px, "white")?;
+    let (iw, ih) = (inner.width() as usize, inner.height() as usize);
     let (w, h) = (iw + 2 * HALO_PAD, ih + 2 * HALO_PAD);
-    let root_end = MARK_SVG.find('>').ok_or_else(|| anyhow!("bad svg"))?;
-    let body_end = MARK_SVG.rfind("</svg>").ok_or_else(|| anyhow!("bad svg"))?;
-    let doc = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{vw}\" height=\"{vh}\" viewBox=\"{vx} {vy} {vw} {vh}\" \
-         color=\"white\">{}<use href=\"#{id}\" x=\"{vx}\" y=\"{vy}\" width=\"{vw}\" height=\"{vh}\"/></svg>",
-        &MARK_SVG[root_end + 1..body_end]
-    );
-    let tree = resvg::usvg::Tree::from_str(&doc, &resvg::usvg::Options::default()).context("parse mark svg")?;
-    let mut inner = resvg::tiny_skia::Pixmap::new(iw as u32, ih as u32).ok_or_else(|| anyhow!("empty mark"))?;
-    let t = resvg::tiny_skia::Transform::from_scale(iw as f32 / vw as f32, ih as f32 / vh as f32);
-    resvg::render(&tree, t, &mut inner.as_mut());
     let mut ink = Tile::new(w, h);
     for y in 0..ih {
         let dst = ((y + HALO_PAD) * w + HALO_PAD) * 4;
@@ -181,7 +159,8 @@ fn render_mark(id: &str, cap_px: f32) -> Result<Tile> {
 
 fn shape_line(fs: &mut FontSystem, text: &str, size: f32, weight: Weight, max_w: f32) -> (Buffer, f32) {
     let attrs = Attrs::new().family(Family::SansSerif).weight(weight);
-    let mut chars: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
+    // Titles come from untrusted tags: bound the input before the O(n) reshape loop.
+    let mut chars: Vec<char> = text.chars().filter(|c| !c.is_control()).take(MAX_TEXT_CHARS).collect();
     let mut truncated = false;
     loop {
         let mut s: String = chars.iter().collect();
@@ -226,12 +205,12 @@ fn draw_text_into(ink: &mut Tile, fs: &mut FontSystem, cache: &mut SwashCache, b
     });
 }
 
-/// Right-aligned title/artist text with halo. None if there is no usable font.
-fn render_text(title: &str, artist: Option<&str>) -> Option<Tile> {
+/// Right-aligned title/artist text with halo. Err if no font is available:
+/// a render must not complete and ship without its title.
+fn render_text(title: &str, artist: Option<&str>) -> Result<Tile> {
     let mut fs = FontSystem::new();
     if fs.db().is_empty() {
-        eprintln!("overlay: no system fonts; title text skipped");
-        return None;
+        return Err(Error::msg("overlay: no fonts available to draw the title"));
     }
     let mut cache = SwashCache::new();
     let (mut tb, tw) = shape_line(&mut fs, title, 34.0, Weight::BOLD, TEXT_MAX_W);
@@ -246,27 +225,28 @@ fn render_text(title: &str, artist: Option<&str>) -> Option<Tile> {
         let aw = *aw;
         draw_text_into(&mut ink, &mut fs, &mut cache, buf, p + (w as f32 - aw).round() as i64, p + th as i64, 215);
     }
-    Some(with_halo(&ink))
+    Ok(with_halo(&ink))
 }
 
 /// Decode, centre-crop to square and resize to `ART_PX`. Bounded: file size,
 /// decoder allocation and dimensions are capped; any failure is an Err.
 fn load_art(path: &Path) -> Result<Tile> {
-    let len = std::fs::metadata(path)?.len();
+    let len = std::fs::metadata(path).map_err(|e| Error::msg(format!("stat: {e}")))?.len();
     if len > MAX_ART_FILE_BYTES {
-        return Err(anyhow!("art file is {len} bytes"));
+        return Err(Error::msg(format!("art file is {len} bytes")));
     }
-    let mut reader = image::ImageReader::open(path)?.with_guessed_format()?;
+    let io = |e: std::io::Error| Error::msg(format!("read: {e}"));
+    let mut reader = image::ImageReader::open(path).map_err(io)?.with_guessed_format().map_err(io)?;
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(MAX_ART_DECODE_BYTES);
     limits.max_image_width = Some(16384);
     limits.max_image_height = Some(16384);
     reader.limits(limits);
-    let img = reader.decode()?.to_rgba8();
+    let img = reader.decode().map_err(|e| Error::msg(format!("decode: {e}")))?.to_rgba8();
     let (w, h) = img.dimensions();
     let side = w.min(h);
     if side == 0 {
-        return Err(anyhow!("empty image"));
+        return Err(Error::msg("empty image"));
     }
     let crop = image::imageops::crop_imm(&img, (w - side) / 2, (h - side) / 2, side, side).to_image();
     let small = image::imageops::resize(&crop, ART_PX, ART_PX, image::imageops::FilterType::Triangle);
@@ -295,6 +275,10 @@ fn scrim(w: usize, h: usize) -> Tile {
     t
 }
 
+///
+/// Geometry (margins, art size, text size, watermark size) is fixed in pixels
+/// for 1080p frames. Other frame sizes are safe (everything is clipped to the
+/// buffer) but are not rescaled.
 pub struct Overlay {
     /// Scrim + text + art, one tile, anchored top-right.
     block: Option<Tile>,
@@ -308,11 +292,11 @@ impl Overlay {
         let art_tile = art.and_then(|p| match load_art(p) {
             Ok(t) => Some(t),
             Err(e) => {
-                eprintln!("overlay: cover art {} skipped: {e:#}", p.display());
+                eprintln!("overlay: cover art {} skipped: {}", p.display(), e.0);
                 None
             }
         });
-        let text = render_text(title, artist);
+        let text = if title.is_empty() && artist.is_none() { None } else { Some(render_text(title, artist)?) };
 
         let block = if text.is_none() && art_tile.is_none() {
             None
@@ -346,14 +330,15 @@ impl Overlay {
     /// shorter than `w*h*4` is left untouched.
     pub fn draw(&self, frame: &mut [u8], w: u32, h: u32, bass: f32) {
         let (w, h) = (w as usize, h as usize);
-        if w == 0 || h == 0 || frame.len() < w * h * 4 {
-            return;
+        match w.checked_mul(h).and_then(|n| n.checked_mul(4)) {
+            Some(need) if need > 0 && frame.len() >= need => {}
+            _ => return,
         }
         let m = SAFE_MARGIN as i64;
         if let Some(b) = &self.block {
             blend(frame, w, h, b, w as i64 - m - b.w as i64, m, false);
         }
-        let bass = if self.reactive && bass.is_finite() { bass.clamp(0.0, 1.0) } else { 0.0 };
+        let bass = if self.reactive && !bass.is_nan() { bass.clamp(0.0, 1.0) } else { 0.0 };
         let idx = (bass * (self.marks.len() - 1) as f32).round() as usize;
         let t = &self.marks[idx];
         // Anchored at the padded tile's lower-left corner: growth goes up and right.
