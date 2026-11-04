@@ -83,6 +83,41 @@ fn failed_normalise_leaves_no_output() {
     assert!(!dir.join(format!("{sha}.wav.part")).exists());
 }
 
+/// A stub ffmpeg that creates the `.part` output and then fails. Only the
+/// cleanup in `normalise_with_ffmpeg` can make the `.part` assertion pass.
+#[test]
+fn ffmpeg_failure_after_writing_part_removes_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tmpdir();
+    let input = dir.join("input.wav");
+    std::fs::write(&input, b"placeholder input").unwrap();
+    let sha = sha256_of_file(input.to_str().unwrap());
+    let part = dir.join(format!("{sha}.wav.part"));
+    let wav = dir.join(format!("{sha}.wav"));
+
+    // The stub writes to its last argument (the output path), then drops a
+    // marker so the test can tell the stub really ran and created the file.
+    let marker = dir.join("stub-ran");
+    let stub = dir.join("fake-ffmpeg.sh");
+    let script = format!(
+        "#!/bin/sh\n\
+         for a in \"$@\"; do out=\"$a\"; done\n\
+         printf partial > \"$out\" || exit 2\n\
+         : > '{}'\n\
+         exit 1\n",
+        marker.display()
+    );
+    std::fs::write(&stub, script).unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let e = normalise_with_ffmpeg(&input, &dir, stub.to_str().unwrap());
+    assert!(e.is_err(), "stub exits 1, so normalise must fail");
+    assert!(marker.exists(), "stub did not run to completion; .part check would be vacuous");
+    assert!(!part.exists(), "failed normalise left {} behind", part.display());
+    assert!(!wav.exists(), "failed normalise left {} behind", wav.display());
+}
+
 #[test]
 fn reads_suno_id3_tags() {
     let s = normalise(Path::new("samples/track.mp3"), &tmpdir()).unwrap();
