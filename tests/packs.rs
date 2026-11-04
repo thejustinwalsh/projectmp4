@@ -6,10 +6,29 @@ use projectmp4::presets::packs::sources;
 use projectmp4::Packs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 fn cache_dir() -> PathBuf {
     // Outside the repo, shared across runs so only the first test pays for the clone.
     std::env::temp_dir().join("projectmp4-packs-test-cache")
+}
+
+/// Populate the shared cache exactly once per test binary; every test waits on
+/// this, so none races another's clone/rename on a cold cache.
+fn populated() -> Packs {
+    static POPULATED: OnceLock<Result<Packs, String>> = OnceLock::new();
+    POPULATED
+        .get_or_init(|| Packs::ensure(&cache_dir()).map_err(|e| e.to_string()))
+        .clone()
+        .unwrap_or_else(|e| panic!("populating the pack cache failed: {e}"))
+}
+
+/// Removes the file on drop, so a failing assertion cannot leave it behind.
+struct RemoveOnDrop(PathBuf);
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 fn walk(dir: &Path, f: &mut dyn FnMut(&Path)) {
@@ -69,7 +88,7 @@ fn assert_counts(p: &Packs) {
 #[ignore = "clones ~10k presets from GitHub (network)"]
 fn fetches_packs_and_finds_the_curated_subsets() {
     let cache = cache_dir();
-    let p = Packs::ensure(&cache).unwrap();
+    let p = populated();
     assert_pinned(&cache);
     assert_counts(&p);
 }
@@ -78,19 +97,20 @@ fn fetches_packs_and_finds_the_curated_subsets() {
 #[ignore = "network on first run (shares the clone cache)"]
 fn second_call_is_idempotent() {
     let cache = cache_dir();
-    let p = Packs::ensure(&cache).unwrap();
+    let p = populated();
     let before: Vec<String> = ["presets-cream-of-the-crop", "presets-projectm-classic", "presets-milkdrop-texture-pack"]
         .iter()
         .map(|n| head(&cache.join(n)))
         .collect();
     // A sentinel inside a clone dir survives only if the second call does not re-clone.
     let sentinel = p.cotc.join(".git").join("idempotence-sentinel");
+    let _ = std::fs::remove_file(&sentinel); // stale one from an aborted run
+    let _cleanup = RemoveOnDrop(sentinel.clone());
     std::fs::write(&sentinel, "x").unwrap();
 
     let p2 = Packs::ensure(&cache).unwrap();
 
     assert!(sentinel.exists(), "second ensure re-cloned instead of reusing the pack");
-    std::fs::remove_file(&sentinel).unwrap();
     assert_pinned(&cache);
     let after: Vec<String> = ["presets-cream-of-the-crop", "presets-projectm-classic", "presets-milkdrop-texture-pack"]
         .iter()

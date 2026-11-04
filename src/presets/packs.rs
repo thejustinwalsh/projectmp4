@@ -6,6 +6,10 @@ use crate::ffi::{Error, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const COTC: &str = "presets-cream-of-the-crop";
+const CLASSIC: &str = "presets-projectm-classic";
+const TEXTURES: &str = "presets-milkdrop-texture-pack";
+
 const SOURCES_TOML: &str = include_str!("../../presets/sources.toml");
 
 /// One pinned repository from `presets/sources.toml`.
@@ -30,15 +34,31 @@ impl Packs {
     /// Clone each pinned pack under `cache` if it is not already at its pin.
     /// Idempotent: a pack whose `HEAD` already equals the pin is left untouched.
     pub fn ensure(cache: &Path) -> Result<Packs> {
+        Self::ensure_from(cache, &sources()?)
+    }
+
+    /// `ensure` over explicit entries (the seam that makes the entry check testable).
+    /// Every pack this type exposes must have an entry; a missing one is an error.
+    pub(crate) fn ensure_from(cache: &Path, entries: &[Source]) -> Result<Packs> {
+        for name in [COTC, CLASSIC, TEXTURES] {
+            if !entries.iter().any(|s| s.name == name) {
+                return Err(Error::msg(format!("sources.toml has no entry for {name}")));
+            }
+        }
         std::fs::create_dir_all(cache)
             .map_err(|e| Error::msg(format!("create {}: {e}", cache.display())))?;
-        for s in sources()? {
-            ensure_source(cache, &s)?;
+        sweep_orphaned_parts(cache);
+        for s in entries {
+            ensure_source(cache, s)?;
         }
+        let dir = |name: &str| {
+            let s = entries.iter().find(|s| s.name == name).expect("checked above");
+            cache.join(&s.name)
+        };
         Ok(Packs {
-            cotc: cache.join("presets-cream-of-the-crop"),
-            classic: cache.join("presets-projectm-classic"),
-            textures: cache.join("presets-milkdrop-texture-pack").join("textures"),
+            cotc: dir(COTC),
+            classic: dir(CLASSIC),
+            textures: dir(TEXTURES).join("textures"),
         })
     }
 
@@ -116,11 +136,18 @@ fn parse_sources(text: &str) -> Result<Vec<Source>> {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
+    // Untrusted third-party repositories: no hook or config from any source may run.
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
+        .args(["-c", "core.hooksPath=/dev/null"])
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         .output()
         .map_err(|e| Error::msg(format!("failed to run git: {e}")))?;
     if !out.status.success() {
@@ -139,11 +166,52 @@ fn at_pin(dir: &Path, commit: &str) -> bool {
     dir.join(".git").exists() && git(dir, &["rev-parse", "HEAD"]).ok().as_deref() == Some(commit)
 }
 
+/// Remove `<name>.part.<pid>.<tid>` directories left by killed runs.
+/// Only entries whose pid is not a live process are removed, so a concurrent
+/// `ensure` (another process, or another thread of this one) is never touched.
+fn sweep_orphaned_parts(cache: &Path) {
+    let Ok(rd) = std::fs::read_dir(cache) else { return };
+    for e in rd.flatten() {
+        let name = e.file_name();
+        let Some((_, rest)) = name.to_str().and_then(|n| n.split_once(".part.")) else { continue };
+        let Some(pid) = rest.split('.').next().and_then(|p| p.parse::<u32>().ok()) else { continue };
+        if e.file_type().is_ok_and(|t| t.is_dir()) && !pid_alive(pid) {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
+/// `ps -p` succeeds for any existing process regardless of owner; if `ps`
+/// itself cannot run, assume alive so the sweep errs toward keeping data.
+fn pid_alive(pid: u32) -> bool {
+    Command::new("ps")
+        .args(["-p", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(true)
+}
+
+/// `dest` may be replaced only if absent or a git repository.
+fn guard_dest(dest: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(dest) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(Error::msg(format!("stat {}: {e}", dest.display()))),
+        Ok(_) if dest.join(".git").exists() => Ok(()),
+        Ok(_) => Err(Error::msg(format!(
+            "{} exists but is not a projectmp4 preset cache (no .git entry); refusing to delete it",
+            dest.display()
+        ))),
+    }
+}
+
 fn ensure_source(cache: &Path, s: &Source) -> Result<()> {
     let dest = cache.join(&s.name);
     if at_pin(&dest, &s.commit) {
         return Ok(());
     }
+    guard_dest(&dest)?; // fail before spending a network fetch
     // Build in a sibling `.part` directory and rename, so an interrupted
     // fetch never leaves a half-populated pack at the final path.
     // Unique per process and thread so concurrent callers cannot trample each other.
@@ -171,6 +239,10 @@ fn ensure_source(cache: &Path, s: &Source) -> Result<()> {
         let _ = std::fs::remove_dir_all(&part);
         return Ok(());
     }
+    if let Err(e) = guard_dest(&dest) {
+        let _ = std::fs::remove_dir_all(&part);
+        return Err(e);
+    }
     let _ = std::fs::remove_dir_all(&dest);
     std::fs::rename(&part, &dest)
         .map_err(|e| Error::msg(format!("rename {} -> {}: {e}", part.display(), dest.display())))
@@ -186,6 +258,71 @@ mod tests {
         assert_eq!(s.len(), 3);
         assert_eq!(s[0].name, "presets-cream-of-the-crop");
         assert_eq!(s[0].commit, "0180df21f5e0bd39b9060cc5de420ed2f1f9e509");
+    }
+
+    fn entry(name: &str) -> Source {
+        Source { name: name.into(), repo: "/nonexistent".into(), commit: "0".repeat(40) }
+    }
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("projectmp4-unit-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn missing_pack_entry_is_an_error() {
+        let cache = tmp("missing-entry");
+        // classic and textures present, cotc absent
+        let entries = [entry(CLASSIC), entry(TEXTURES)];
+        let err = Packs::ensure_from(&cache, &entries).unwrap_err().to_string();
+        assert!(err.contains(COTC), "{err}");
+        assert!(Packs::ensure_from(&cache, &[]).is_err());
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    /// A one-commit local repository to fetch from, so the test needs no network.
+    fn local_repo(dir: &Path) -> String {
+        let run = |args: &[&str]| {
+            let o = Command::new("git").arg("-C").arg(dir).args(args)
+                .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t")
+                .output().unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        };
+        std::fs::create_dir_all(dir).unwrap();
+        run(&["init", "--quiet"]);
+        std::fs::write(dir.join("a.milk"), "x").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "--quiet", "-m", "c"]);
+        run(&["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn non_git_dest_is_refused_and_its_data_survives() {
+        let root = tmp("guard");
+        let repo = root.join("origin");
+        let commit = local_repo(&repo);
+        let cache = root.join("cache");
+        let s = Source { name: "pack".into(), repo: repo.display().to_string(), commit };
+        let dest = cache.join("pack");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("precious.txt"), "mine").unwrap();
+
+        let res = ensure_source(&cache, &s);
+        assert!(dest.join("precious.txt").exists(), "user data was deleted");
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("not a projectmp4 preset cache"), "{err}");
+        assert!(err.contains(&dest.display().to_string()), "{err}");
+
+        // Control: once the dest is absent the same call succeeds, so the error above
+        // came from the guard and not from a broken fixture.
+        std::fs::remove_dir_all(&dest).unwrap();
+        ensure_source(&cache, &s).unwrap();
+        assert!(dest.join("a.milk").exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
