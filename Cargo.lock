@@ -468,6 +468,7 @@ version = "0.1.0"
 dependencies = [
  "bindgen",
  "cmake",
+ "deck-media-codec",
  "deck-track-analysis",
  "serde_json",
  "sha2",
