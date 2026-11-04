@@ -1,0 +1,18 @@
+[package]
+name = "projectmp4"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "projectmp4"
+path = "src/main.rs"
+
+[lib]
+name = "projectmp4"
+path = "src/lib.rs"
+
+[dependencies]
+
+[build-dependencies]
+cmake = "0.1"
+bindgen = "0.71"
