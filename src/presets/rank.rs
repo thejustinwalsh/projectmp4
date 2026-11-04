@@ -2,8 +2,9 @@
 //! measured from each preset's own equation text.
 //!
 //! `score_milk` is a line-for-line port of the `score()` function in the analysis
-//! prototype (`score_cotc.py`), including its quirks, because the committed fixture
-//! `tests/fixtures/cotc_scores.json` is that prototype's recorded output.
+//! prototype (`score_cotc.py`), including its quirks, except the de-nesting
+//! subtraction (a prototype bug, removed). The committed fixture
+//! `tests/fixtures/cotc_scores.json` is the prototype's output regenerated with that fix.
 //! Preset files are untrusted data: they are only ever read as text, never run.
 
 use crate::ffi::{Error, Result};
@@ -14,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Score {
-    /// `3 * (bass + bass_att)` after de-nesting.
+    /// `3 * (bass + bass_att)`.
     pub bass: u32,
     /// Weighted sum of all eight audio variables; includes the `bass` term.
     pub react: u32,
@@ -136,11 +137,9 @@ pub fn score_milk(text: &str) -> Score {
     for (n, (k, _)) in VARS.iter().enumerate() {
         c[n] = count_word(&code, k) as i64;
     }
-    // The prototype subtracts each `_att` count from its bare counterpart (floored at 0).
-    // Indices: 0 bass_att,1 bass,2 treb_att,3 treb,4 mid_att,5 mid,6 vol_att,7 vol.
-    for bare in [1, 3, 5, 7] {
-        c[bare] = (c[bare] - c[bare - 1]).max(0);
-    }
+    // No de-nesting subtraction (bare -= _att): `count_word` already rejects `bass_att` when
+    // matching `bass`, so the counts are exact. The prototype subtracted anyway, which made
+    // each pair contribute max(raw, att) instead of raw + att. That was a bug, fixed here.
     let react: i64 = c.iter().zip(VARS).map(|(n, (_, w))| n * w).sum();
     let bass = 3 * (c[0] + c[1]);
     Score {
@@ -338,11 +337,11 @@ mod tests {
     fn bass_att_is_not_double_counted_as_bass() {
         assert_eq!(score_milk("per_frame_1=zoom=1+bass_att*0.1;").bass, 3);
         assert_eq!(score_milk("per_frame_1=zoom=1+bass*0.1;").bass, 3);
-        // Prototype quirk, ported on purpose: the bare count already excludes `bass_att`
-        // (the lookahead rejects `_`), yet it is still reduced by the `_att` count, so one
-        // of each scores as one `bass_att`.
-        assert_eq!(score_milk("per_frame_1=a=bass+bass_att;").bass, 3);
-        assert_eq!(score_milk("per_frame_1=a=bass+bass+bass_att;").bass, 6);
+        // No de-nesting subtraction, on purpose: the lookahead already rejects `_`, so the
+        // bare `bass` count excludes `bass_att` and the two simply add. The prototype
+        // subtracted `_att` from the bare count anyway (scoring max, not sum); do not restore it.
+        assert_eq!(score_milk("per_frame_1=a=bass+bass_att;").bass, 6);
+        assert_eq!(score_milk("per_frame_1=a=bass+bass+bass_att;").bass, 9);
     }
 
     #[test]
