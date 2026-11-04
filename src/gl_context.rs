@@ -459,7 +459,7 @@ impl GlContext {
     /// That rules out holding both in one struct by value; hold the context
     /// one level up and borrow it:
     ///
-    /// ```ignore
+    /// ```text
     /// struct Renderer<'gl> {
     ///     gl: &'gl GlContext,
     ///     pm: ffi::Instance<'gl>,
