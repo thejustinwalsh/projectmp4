@@ -10,7 +10,7 @@
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::sync::OnceLock;
 
-use crate::ffi::{Error, LoadProc, Result};
+use crate::ffi::{Error, Instance, LoadProc, Result};
 
 // ---------------------------------------------------------------------------
 // CGL (OpenGL.framework)
@@ -139,6 +139,7 @@ mod gl {
     pub const LINEAR: GLint = 0x2601;
     pub const CLAMP_TO_EDGE: GLint = 0x812F;
     pub const PACK_ALIGNMENT: GLenum = 0x0D05;
+    pub const READ_FRAMEBUFFER_BINDING: GLenum = 0x8CAA;
     pub const COLOR_BUFFER_BIT: GLbitfield = 0x4000;
     pub const DEPTH_BUFFER_BIT: GLbitfield = 0x0100;
     pub const NO_ERROR: GLenum = 0;
@@ -215,6 +216,8 @@ mod gl {
         );
         #[link_name = "glPixelStorei"]
         pub fn pixel_store_i(pname: GLenum, param: GLint);
+        #[link_name = "glGetIntegerv"]
+        pub fn get_integer_v(pname: GLenum, data: *mut GLint);
         #[link_name = "glViewport"]
         pub fn viewport(x: GLint, y: GLint, width: GLsizei, height: GLsizei);
         #[link_name = "glClearColor"]
@@ -255,13 +258,16 @@ fn gl_string(name: gl::GLenum) -> String {
 ///
 /// Invariants:
 /// - `new` leaves the context current on the calling thread. Everything that
-///   touches GL — including `ffi::Instance::new`, every render call, and
-///   `Instance`'s `Drop` — must happen on that thread with this context
+///   touches GL — including [`GlContext::create_instance`], every render call,
+///   and `Instance`'s `Drop` — must happen on that thread with this context
 ///   current. Call [`GlContext::make_current`] if anything may have changed it.
 /// - Drop order matters: an `ffi::Instance` created against this context must
 ///   be dropped *before* the `GlContext`, or `projectm_destroy` deletes GL
-///   objects with no current context. Declaring the `GlContext` first in a
-///   scope gives this for free, since Rust drops locals in reverse order.
+///   objects with no current context. [`GlContext::create_instance`] makes the
+///   compiler enforce this, because the returned `Instance<'_>` borrows the
+///   context. Do not rely on reading the order off the page: **locals drop in
+///   reverse declaration order, but struct fields drop in declaration order**
+///   (RFC 1857), so the two are written back to front from each other.
 /// - Holds raw pointers and relies on thread-local GL currency, so it is
 ///   `!Send` and `!Sync`.
 pub struct GlContext {
@@ -302,6 +308,9 @@ impl GlContext {
             CGLChoosePixelFormat(attribs.as_ptr(), &mut pix, &mut npix)
         })?;
         if pix.is_null() || npix == 0 {
+            if !pix.is_null() {
+                unsafe { CGLDestroyPixelFormat(pix) };
+            }
             return Err(Error::msg(
                 "CGLChoosePixelFormat matched no accelerated OpenGL 3.2 core renderer",
             ));
@@ -433,9 +442,28 @@ impl GlContext {
         self.height
     }
 
-    /// The GL proc loader to hand to `ffi::Instance::new`.
+    /// The GL proc loader handed to libprojectM. Exposed for a second context
+    /// (Task 13's preview window) that creates its own instance.
     pub fn loader(&self) -> LoadProc {
         gl_load_proc
+    }
+
+    /// Creates a libprojectM instance bound to this context.
+    ///
+    /// The returned `Instance` borrows `self`, so the borrow checker refuses
+    /// any arrangement that would drop the context first. That rules out
+    /// holding both in one struct by value; hold the context one level up and
+    /// borrow it:
+    ///
+    /// ```ignore
+    /// struct Renderer<'gl> {
+    ///     gl: &'gl GlContext,
+    ///     pm: ffi::Instance<'gl>,
+    /// }
+    /// ```
+    pub fn create_instance(&self) -> Result<Instance<'_>> {
+        self.ensure_current()?;
+        Instance::new(self.loader())
     }
 
     /// `GL_VERSION` and `GL_RENDERER` of the live context, for diagnostics.
@@ -448,12 +476,20 @@ impl GlContext {
     /// Rows come back **bottom-up**: `glReadPixels` origin is the lower-left
     /// corner, so row 0 of the returned buffer is the bottom scanline of the
     /// image. The encoder (Task 12) must either flip or tell the sink.
+    ///
+    /// The read-framebuffer binding and `GL_PACK_ALIGNMENT` are global state;
+    /// both are saved and restored so a preview context sharing this thread
+    /// (Task 13) never inherits them.
     pub fn read_rgba(&self) -> Result<Vec<u8>> {
         self.ensure_current()?;
         let len = self.width as usize * self.height as usize * 4;
         let mut buf = vec![0u8; len];
+        let mut prev_fb: gl::GLint = 0;
+        let mut prev_align: gl::GLint = 4;
         unsafe {
             let _ = gl::get_error();
+            gl::get_integer_v(gl::READ_FRAMEBUFFER_BINDING, &mut prev_fb);
+            gl::get_integer_v(gl::PACK_ALIGNMENT, &mut prev_align);
             gl::bind_framebuffer(gl::READ_FRAMEBUFFER, self.fbo);
             gl::pixel_store_i(gl::PACK_ALIGNMENT, 1);
             gl::read_pixels(
@@ -465,6 +501,8 @@ impl GlContext {
                 gl::UNSIGNED_BYTE,
                 buf.as_mut_ptr() as *mut c_void,
             );
+            gl::pixel_store_i(gl::PACK_ALIGNMENT, prev_align);
+            gl::bind_framebuffer(gl::READ_FRAMEBUFFER, prev_fb as gl::GLuint);
         }
         gl_check("glReadPixels from the offscreen framebuffer")?;
         Ok(buf)

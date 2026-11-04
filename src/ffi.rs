@@ -1,6 +1,11 @@
 //! Safe wrapper over the libprojectM 4.x C API (vendored, statically linked).
 
-#[allow(non_camel_case_types, non_snake_case, non_upper_case_globals, dead_code)]
+#[allow(
+    non_camel_case_types,
+    non_snake_case,
+    non_upper_case_globals,
+    dead_code
+)]
 #[allow(clippy::all)]
 mod sys {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
@@ -8,7 +13,9 @@ mod sys {
 
 use std::borrow::Cow;
 use std::ffi::{c_char, c_void, CString};
+use std::marker::PhantomData;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// OpenGL symbol loader: given a NUL-terminated name, returns the function pointer.
 pub type LoadProc = unsafe extern "C" fn(name: *const c_char, user: *mut c_void) -> *mut c_void;
@@ -80,15 +87,50 @@ impl Channels {
 ///   and when the `Instance` is dropped (`projectm_destroy` frees GL resources).
 /// - A Rust `LoadProc` callback must wrap its body in `std::panic::catch_unwind`;
 ///   unwinding out of an `extern "C"` fn aborts the process.
-/// - libprojectM's GL resolver is process-global and "first create wins": later
-///   instances ignore their `load_proc`, so treat `Instance` as a per-process singleton.
+/// - libprojectM's GL resolver is process-global and "first create wins": the
+///   `load_proc` handed to the second and later instances is ignored. That is
+///   harmless here only because `gl_context::gl_load_proc` is a context-free
+///   `static fn` that `dlsym`s OpenGL.framework: every instance would have
+///   supplied the same resolver, so there is nothing to win. Swap in a loader
+///   that closes over per-context state and `Instance` becomes a true
+///   per-process singleton.
 /// - Holds a raw pointer, so it is `!Send` and `!Sync`.
-pub struct Instance {
+/// - The `'gl` lifetime borrows the [`crate::gl_context::GlContext`] this
+///   instance was created against, so the context cannot be dropped first.
+///   Construct one with `GlContext::create_instance`, not directly.
+pub struct Instance<'gl> {
     handle: sys::projectm_handle,
+    /// Bumped by [`on_preset_switch_failed`]. Boxed so its address is stable
+    /// across moves of the `Instance`; projectM holds that address as the
+    /// callback's user data for the life of the instance.
+    load_failures: Box<AtomicU64>,
+    _gl: PhantomData<&'gl ()>,
 }
 
-impl Instance {
-    pub fn new(load_proc: LoadProc) -> Result<Instance> {
+/// projectM calls this synchronously from inside `projectm_load_preset_file`
+/// when the preset cannot be parsed or found
+/// (`vendor/projectm/src/libprojectM/ProjectM.cpp:70`). The body is wrapped in
+/// `catch_unwind` because unwinding out of an `extern "C"` fn aborts; it is in
+/// practice panic-free, doing nothing but one relaxed increment.
+unsafe extern "C" fn on_preset_switch_failed(
+    _filename: *const c_char,
+    _message: *const c_char,
+    user_data: *mut c_void,
+) {
+    let _ = std::panic::catch_unwind(|| {
+        if user_data.is_null() {
+            return;
+        }
+        unsafe { &*(user_data as *const AtomicU64) }.fetch_add(1, Ordering::Relaxed);
+    });
+}
+
+impl<'gl> Instance<'gl> {
+    /// `'gl` is unconstrained by the arguments, so the caller chooses it.
+    /// `GlContext::create_instance` is the only caller and pins it to its own
+    /// `&self`, which is what makes the drop-order invariant a compile error
+    /// instead of a comment.
+    pub(crate) fn new(load_proc: LoadProc) -> Result<Instance<'gl>> {
         let handle = unsafe {
             sys::projectm_create_with_opengl_load_proc(Some(load_proc), std::ptr::null_mut())
         };
@@ -97,7 +139,19 @@ impl Instance {
                 "projectm_create_with_opengl_load_proc returned null",
             ))
         } else {
-            Ok(Instance { handle })
+            let load_failures = Box::new(AtomicU64::new(0));
+            unsafe {
+                sys::projectm_set_preset_switch_failed_event_callback(
+                    handle,
+                    Some(on_preset_switch_failed),
+                    &*load_failures as *const AtomicU64 as *mut c_void,
+                )
+            };
+            Ok(Instance {
+                handle,
+                load_failures,
+                _gl: PhantomData,
+            })
         }
     }
 
@@ -156,22 +210,34 @@ impl Instance {
         unsafe { sys::projectm_opengl_render_frame_fbo(self.handle, fbo) };
     }
 
-    /// Loads a preset file. projectM reports failure only through its log --
-    /// the current preset simply stays put -- so an `Err` here means the path
-    /// could not be turned into a C string, not that the preset is valid.
+    /// Loads a preset file, failing if projectM could not parse or find it.
+    ///
+    /// `projectm_load_preset_file` itself returns `void` and only logs: on
+    /// failure the previous preset -- or the idle "M" logo -- silently stays on
+    /// screen. The preset-switch-failed callback registered in
+    /// [`Instance::new`] fires synchronously from inside that call, so counting
+    /// its invocations across the call turns the silence into a `Result`.
+    /// projectM's log line on stderr carries the reason.
     pub fn load_preset_file(&self, path: &Path, smooth_transition: bool) -> Result<()> {
         let s = path
             .to_str()
             .ok_or_else(|| Error::msg("preset path is not valid UTF-8"))?;
         let c = CString::new(s).map_err(|_| Error::msg("preset path contains an interior NUL"))?;
+        let before = self.load_failures.load(Ordering::Relaxed);
         unsafe { sys::projectm_load_preset_file(self.handle, c.as_ptr(), smooth_transition) };
-        Ok(())
+        if self.load_failures.load(Ordering::Relaxed) == before {
+            Ok(())
+        } else {
+            Err(Error::msg(format!(
+                "projectM could not load preset {s} (reason logged to stderr)"
+            )))
+        }
     }
 }
 
 /// Destroys the instance. The GL context that was current at creation must be
 /// current here, or GL resource deletion is undefined.
-impl Drop for Instance {
+impl Drop for Instance<'_> {
     fn drop(&mut self) {
         unsafe { sys::projectm_destroy(self.handle) };
     }

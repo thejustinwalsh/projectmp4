@@ -20,11 +20,20 @@ fn main() {
         .define("BUILD_DOCS", "OFF")
         .build();
 
-    println!("cargo:rustc-link-search=native={}", dst.join("lib").display());
+    println!(
+        "cargo:rustc-link-search=native={}",
+        dst.join("lib").display()
+    );
     // projectM_eval and glad are not installed by cmake; link them from the build tree.
     let bt = dst.join("build");
-    println!("cargo:rustc-link-search=native={}", bt.join("vendor/projectm-eval/projectm-eval").display());
-    println!("cargo:rustc-link-search=native={}", bt.join("vendor/glad").display());
+    println!(
+        "cargo:rustc-link-search=native={}",
+        bt.join("vendor/projectm-eval/projectm-eval").display()
+    );
+    println!(
+        "cargo:rustc-link-search=native={}",
+        bt.join("vendor/glad").display()
+    );
     println!("cargo:rustc-link-lib=static=projectM-4");
     println!("cargo:rustc-link-lib=static=projectM-4-playlist");
     println!("cargo:rustc-link-lib=static=projectM_eval");
@@ -36,7 +45,12 @@ fn main() {
     let include = dst.join("include");
     let bindings = bindgen::Builder::default()
         .header(include.join("projectM-4/projectM.h").display().to_string())
-        .header(include.join("projectM-4/render_opengl.h").display().to_string())
+        .header(
+            include
+                .join("projectM-4/render_opengl.h")
+                .display()
+                .to_string(),
+        )
         .clang_arg(format!("-I{}", include.display()))
         .allowlist_function("projectm_.*")
         .allowlist_type("projectm_.*")
