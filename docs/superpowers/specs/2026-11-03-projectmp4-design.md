@@ -56,8 +56,22 @@ size and not look like a stock font. Designing it is in scope (§7).
    rather than after a full render.
 8. **Title, artist and cover art in the upper right. Watermark in the lower left.** Legible at
    thumbnail size, not covering the action.
-9. **Deterministic.** Same inputs plus same preset plus same seed produce the same video. Makes
-   the thing debuggable and makes A/B comparison of presets meaningful.
+9. **Structurally deterministic.** The same inputs produce the same *plan*: the same switch
+   timeline, preset sequence, frame count and duration, dumpable as JSON with `--dump-plan`.
+
+   **Pixel-exact determinism is not achievable and is not a goal.** Discovered during Task 2 by a
+   negative-control test: libprojectM seeds two RNGs we cannot reach from the C API —
+   `MilkdropPreset/PresetState.cpp:21-23` seeds `hueRandomOffsets` from `std::random_device`, and
+   `Renderer/MilkdropNoise.cpp:56` seeds noise textures from `system_clock::now()`. Measured, two
+   renders of the *same* preset with a pinned frame clock differ in ~28% of pixels.
+   `projectm_set_frame_time` does not change this.
+
+   Consequence, binding on every task: **never compare frames by equality or by a difference
+   threshold.** Frame assertions must test properties (is it black, how much of it is lit) rather
+   than compare two renders. The goal's original purpose — debuggability and A/B comparison of
+   presets — is served by the dumped plan plus watching the videos, which is what that comparison
+   actually needs. Making pixels reproducible would mean patching the vendored C++ RNG seeding,
+   forking upstream and owning that maintenance.
 
 ## 3. Non-goals
 
