@@ -34,8 +34,8 @@ pub fn version() -> (u32, u32, u32) {
 /// (`projectm_set_frame_time`, `projectm_opengl_render_frame_fbo`). Referencing them
 /// forces a link error if a submodule bump drops them. Returns true if both are non-null.
 pub fn master_symbols_present() -> bool {
-    let a = sys::projectm_set_frame_time as usize;
-    let b = sys::projectm_opengl_render_frame_fbo as usize;
+    let a = sys::projectm_set_frame_time as *const () as usize;
+    let b = sys::projectm_opengl_render_frame_fbo as *const () as usize;
     a != 0 && b != 0
 }
 
