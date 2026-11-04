@@ -1,0 +1,26 @@
+# Presets documented as broken under libprojectM
+# (https://github.com/projectM-visualizer/projectm/issues/700).
+# Matching is on the normalised file name (lowercase, non-alphanumeric runs
+# collapsed to one space, `.milk` removed). `match` is "exact" (default) or "prefix".
+# Task 12's render-verification failures are appended here as they are found.
+
+[[preset]]
+name = "martin - mandelbox explorer v1 nz+3"
+reason = "renders white windowed, black fullscreen"
+
+[[preset]]
+name = "suksma - crotch connected siamese"
+reason = "shader compile error"
+
+[[preset]]
+name = "$$$ Royal - Mashup (452)"
+reason = "renders black (UV convention)"
+
+[[preset]]
+name = "Stahlregen & EoS + Phat + Pithlit + Unchained - Raw Mash Up"
+reason = "Supernova Raw Mash Up: mostly black"
+
+[[preset]]
+name = "phliping out"
+match = "prefix"
+reason = "Liquid Ripples: missing worms texture"
