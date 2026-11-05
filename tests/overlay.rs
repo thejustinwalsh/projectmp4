@@ -335,13 +335,40 @@ fn short_buffers_and_odd_sizes_never_panic_or_write_out_of_bounds() {
 fn the_title_uses_the_embedded_oswald_not_a_system_font() {
     // Oracle: the same string through a FontSystem holding ONLY Oswald. Production also
     // has host fonts in its db, so if it resolves "Oswald" by name the pixels are
-    // identical; if it resolves SansSerif (a host face) they are not.
+    // identical; any other family (see the positive control) differs.
+    // Smallest wrong impl that passes: none short of pixel-identical Oswald Bold 34px,
+    // except a wrong size applied to both sides (shared code path).
     let mine = fonts::render_title_ink("Hollow Signal");
     let oracle = fonts::oswald_only_ink("Hollow Signal");
     assert!(fonts::ink(&oracle) > 500, "oracle drew almost nothing: {}", fonts::ink(&oracle));
     let diff = fonts::mean_abs_diff(&mine, &oracle);
     assert!(diff < 1e-9, "title is not being shaped with Oswald (mean |diff| {diff})");
     assert_eq!((mine.w, mine.h), (oracle.w, oracle.h), "title tile size differs from Oswald's");
+}
+
+#[test]
+fn positive_control_a_different_family_is_far_from_the_oswald_oracle() {
+    // If this were not large, the identity test above could not tell Oswald from anything.
+    // Courier New is a macOS system face and certainly not Oswald. It also serves as the
+    // red run for "not pinning the family".
+    let oracle = fonts::oswald_only_ink("Hollow Signal");
+    let other = fonts::render_in_family("Courier New", "Hollow Signal");
+    assert!(fonts::ink(&other) > 500, "control drew nothing");
+    let diff = fonts::mean_abs_diff(&other, &oracle);
+    assert!(diff > 0.05, "a different family is too close to Oswald: {diff}");
+}
+
+#[test]
+fn a_host_installed_oswald_does_not_beat_the_embedded_one() {
+    // Plant a decoy (Courier New Bold) under the family name "Oswald" as if the user had their
+    // own Oswald installed. Smallest wrong impl that passes: none that loads host fonts first
+    // (then the decoy wins and the diff is large); the decoy proved to win in that order.
+    let decoy_first_would_be = fonts::render_in_family("Courier New", "Hollow Signal");
+    let oracle = fonts::oswald_only_ink("Hollow Signal");
+    assert!(fonts::mean_abs_diff(&decoy_first_would_be, &oracle) > 0.05, "decoy is not distinguishable from Oswald");
+    let mine = fonts::title_with_decoy_host_oswald("Hollow Signal");
+    let diff = fonts::mean_abs_diff(&mine, &oracle);
+    assert!(diff < 1e-9, "a host face named Oswald beat the embedded one (mean |diff| {diff})");
 }
 
 #[test]
@@ -356,25 +383,54 @@ fn cyrillic_titles_render_from_oswald_itself() {
 }
 
 #[test]
-fn glyphs_oswald_lacks_fall_back_instead_of_vanishing() {
-    // Oswald has no CJK. Production must differ from the Oswald-only oracle here:
-    // that is what proves fallback is live rather than the text dropped or tofu.
-    // (Needs a host CJK font; macOS ships several.)
+fn glyphs_oswald_lacks_fall_back_to_real_distinct_glyphs() {
+    // Oswald has no CJK. Production must differ from the Oswald-only oracle (fallback live),
+    // and the three characters must render as three *different* shapes: a host face that
+    // only supplied its .notdef box would draw 日本語 and 日日日 identically.
+    // Needs a host CJK font (macOS ships several); on a CJK-less CI machine mark this #[ignore].
     let mine = fonts::render_title_ink("日本語");
     let oracle = fonts::oswald_only_ink("日本語");
     assert!(fonts::ink(&mine) > 300, "CJK title drew almost nothing: {}", fonts::ink(&mine));
-    let diff = fonts::mean_abs_diff(&mine, &oracle);
-    assert!(diff > 1e-4, "CJK rendered like an Oswald-only db, so no fallback happened (diff {diff})");
+    assert!(fonts::mean_abs_diff(&mine, &oracle) > 1e-4, "CJK rendered like an Oswald-only db: no fallback");
+    let same = fonts::render_title_ink("日日日");
+    let d = fonts::mean_abs_diff(&mine, &same);
+    assert!(d > 1e-3, "日本語 and 日日日 render alike (diff {d}): fallback is drawing .notdef boxes");
 }
 
 #[test]
-fn overlay_builds_and_draws_the_title_from_the_embedded_font_alone() {
-    // The host's fonts cannot be removed from here, so prove the two halves separately:
-    // an Oswald-only db (what a font-less host reduces to) draws the title, and the
-    // real Overlay draws it in the upper-right quadrant.
-    assert!(fonts::ink(&fonts::oswald_only_ink("Hollow Signal")) > 500);
+fn overlay_draws_the_oswald_title_pixel_for_pixel() {
+    // Overlay's own pixels vs the Oswald-only oracle. On a black frame the scrim and
+    // halo are black, so the frame's RGB equals the text tile's premultiplied RGB.
+    // Smallest wrong impl that passes: none that changes the font, size, weight or position
+    // of the title (the crop is placed from the layout constants).
+    let oracle = fonts::oswald_only_ink("Hollow Signal");
     let mut f = black_frame(W, H);
     Overlay::new("Hollow Signal", None, None, MarkStyle::Word, true).unwrap().draw(&mut f, W, H, 0.0);
-    let ink = ink_in_region(&f, Region::UpperRight);
-    assert!((500.0..8000.0).contains(&ink), "title ink {ink}");
+    let x0 = W - SAFE_MARGIN - BLOCK_PAD as u32 - oracle.w as u32;
+    let y0 = SAFE_MARGIN + BLOCK_PAD as u32;
+    let mut crop = fonts::TitleInk { w: oracle.w, h: oracle.h, px: vec![0; oracle.w * oracle.h * 4] };
+    for y in 0..oracle.h {
+        for x in 0..oracle.w {
+            let i = (((y0 + y as u32) * W + x0 + x as u32) * 4) as usize;
+            let o = (y * oracle.w + x) * 4;
+            crop.px[o..o + 3].copy_from_slice(&f[i..i + 3]);
+            crop.px[o + 3] = oracle.px[o + 3]; // frame alpha is opaque; compare colour only
+        }
+    }
+    assert!(fonts::ink(&crop) > 500, "no title ink at the expected position");
+    let diff = fonts::mean_abs_diff(&crop, &oracle);
+    assert!(diff < 1e-9, "Overlay title differs from the Oswald oracle (mean |diff| {diff})");
+}
+
+#[test]
+fn the_artist_line_is_oswald_regular_below_the_title() {
+    // Artist shapes at Weight::NORMAL through the same path. Matching the oracle pins the face
+    // and weight (a Bold or non-Oswald artist differs); the extra height proves a second line.
+    let mine = fonts::render_title_artist_ink("Hollow Signal", "GH0STF1R3");
+    let oracle = fonts::oswald_only_ink_with("Hollow Signal", Some("GH0STF1R3"));
+    let title_only = fonts::oswald_only_ink("Hollow Signal");
+    assert!(mine.h > title_only.h, "no artist line: {} vs {}", mine.h, title_only.h);
+    assert!(fonts::ink(&mine) > fonts::ink(&title_only) + 200, "artist drew no ink");
+    let diff = fonts::mean_abs_diff(&mine, &oracle);
+    assert!(diff < 1e-9, "artist line differs from Oswald Regular (mean |diff| {diff})");
 }

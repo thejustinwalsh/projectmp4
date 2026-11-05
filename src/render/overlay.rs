@@ -14,7 +14,6 @@ use super::mark::rasterise_symbol;
 use crate::ffi::{Error, Result};
 use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache, Weight};
 use std::path::Path;
-use std::sync::Arc;
 
 pub const SAFE_MARGIN: u32 = 64;
 pub const ART_PX: u32 = 180;
@@ -22,28 +21,55 @@ pub const ART_PX: u32 = 180;
 /// square (1.2^2 = 1.44), which is what keeps loud/quiet ink under 1.6x.
 pub const MAX_MARK_SCALE: f32 = 1.2;
 
-/// Embedded typeface (SIL OFL 1.1, see assets/fonts). Requested by *name*: the
-/// FontSystem also keeps the host's fonts for fallback (CJK, Arabic, ...), and
-/// `Family::SansSerif` would resolve to a host face, so only the name pins Oswald.
+/// Embedded typeface (SIL OFL 1.1, see assets/fonts).
+///
+/// Two facts make the title identical across machines, both established by
+/// experiment (a host face registered under the family name "Oswald"):
+/// 1. the face is requested by *name* (`Family::Name`), never a generic family
+///    such as `SansSerif`, whose resolution depends on the host; and
+/// 2. the embedded faces are inserted into the database *before* the host's, because
+///    when two faces share a family and weight, the first one inserted wins. (cosmic-text's
+///    own `new_with_fonts` loads system fonts first, so a host-installed Oswald
+///    would beat the embedded copy.) The host fonts stay in the database only
+///    as fallback for glyphs Oswald lacks (CJK, Arabic, ...).
+#[doc(hidden)]
 pub const OSWALD_REGULAR: &[u8] = include_bytes!("../../assets/fonts/Oswald-Regular.ttf");
+#[doc(hidden)]
 pub const OSWALD_BOLD: &[u8] = include_bytes!("../../assets/fonts/Oswald-Bold.ttf");
-const FONT_FAMILY: &str = "Oswald";
+#[doc(hidden)]
+pub const FONT_FAMILY: &str = "Oswald";
 
-/// A FontSystem holding Oswald plus whatever the host provides (the latter only
-/// for glyphs Oswald lacks).
-pub fn production_font_system() -> FontSystem {
-    FontSystem::new_with_fonts([
-        fontdb::Source::Binary(Arc::new(OSWALD_REGULAR)),
-        fontdb::Source::Binary(Arc::new(OSWALD_BOLD)),
-    ])
+/// Embedded Oswald first, then `host` (production: the system fonts), then
+/// the platform fallback. `host` is a parameter so tests can plant a decoy
+/// host "Oswald" and prove the embedded copy still wins.
+#[doc(hidden)]
+pub fn font_system_with_host(host: impl FnOnce(&mut fontdb::Database)) -> FontSystem {
+    let mut db = fontdb::Database::new();
+    db.load_font_data(OSWALD_REGULAR.to_vec());
+    db.load_font_data(OSWALD_BOLD.to_vec());
+    host(&mut db);
+    // The locale only steers script-specific fallback ordering.
+    FontSystem::new_with_locale_and_db("en-US".to_string(), db)
 }
 
-/// Title-only text tile as (width, height, premultiplied RGBA) shaped with `fs`.
-/// Exposed so tests can compare against an Oswald-only oracle.
+#[doc(hidden)]
+pub fn production_font_system() -> FontSystem {
+    font_system_with_host(|db| db.load_system_fonts())
+}
+
+/// Text tile as (width, height, premultiplied RGBA) shaped with `fs` in
+/// `family`. Exposed so tests can compare against an Oswald-only oracle and
+/// run a deliberately different family as a positive control.
+#[doc(hidden)]
+pub fn text_tile_pixels(fs: &mut FontSystem, family: &str, title: &str, artist: Option<&str>) -> Result<(usize, usize, Vec<u8>)> {
+    let t = render_text_with(fs, family, title, artist)?;
+    Ok((t.w, t.h, t.px))
+}
+
+/// Title-only convenience over [`text_tile_pixels`] with the production family.
 #[doc(hidden)]
 pub fn title_tile_pixels(fs: &mut FontSystem, title: &str) -> Result<(usize, usize, Vec<u8>)> {
-    let t = render_text_with(fs, title, None)?;
-    Ok((t.w, t.h, t.px))
+    text_tile_pixels(fs, FONT_FAMILY, title, None)
 }
 
 const MARK_SVG: &str = include_str!("../../assets/gh0stf1r3.svg");
@@ -182,8 +208,8 @@ fn render_mark(id: &str, cap_px: f32) -> Result<Tile> {
     Ok(with_halo(&ink))
 }
 
-fn shape_line(fs: &mut FontSystem, text: &str, size: f32, weight: Weight, max_w: f32) -> (Buffer, f32) {
-    let attrs = Attrs::new().family(Family::Name(FONT_FAMILY)).weight(weight);
+fn shape_line(fs: &mut FontSystem, family: &str, text: &str, size: f32, weight: Weight, max_w: f32) -> (Buffer, f32) {
+    let attrs = Attrs::new().family(Family::Name(family)).weight(weight);
     // Titles come from untrusted tags: bound the input before the O(n) reshape loop.
     let mut chars: Vec<char> = text.chars().filter(|c| !c.is_control()).take(MAX_TEXT_CHARS).collect();
     let mut truncated = false;
@@ -233,16 +259,16 @@ fn draw_text_into(ink: &mut Tile, fs: &mut FontSystem, cache: &mut SwashCache, b
 /// Right-aligned title/artist text with halo. Err if no font is available:
 /// a render must not complete and ship without its title.
 fn render_text(title: &str, artist: Option<&str>) -> Result<Tile> {
-    render_text_with(&mut production_font_system(), title, artist)
+    render_text_with(&mut production_font_system(), FONT_FAMILY, title, artist)
 }
 
-fn render_text_with(fs: &mut FontSystem, title: &str, artist: Option<&str>) -> Result<Tile> {
+fn render_text_with(fs: &mut FontSystem, family: &str, title: &str, artist: Option<&str>) -> Result<Tile> {
     if fs.db().is_empty() {
         return Err(Error::msg("overlay: no fonts available to draw the title"));
     }
     let mut cache = SwashCache::new();
-    let (mut tb, tw) = shape_line(fs, title, 34.0, Weight::BOLD, TEXT_MAX_W);
-    let mut ab = artist.map(|a| shape_line(fs, a, 24.0, Weight::NORMAL, TEXT_MAX_W));
+    let (mut tb, tw) = shape_line(fs, family, title, 34.0, Weight::BOLD, TEXT_MAX_W);
+    let mut ab = artist.map(|a| shape_line(fs, family, a, 24.0, Weight::NORMAL, TEXT_MAX_W));
     let w = tw.max(ab.as_ref().map_or(0.0, |a| a.1)).ceil() as usize;
     let (th, ah) = (41, 29);
     let h = th + if ab.is_some() { ah } else { 0 };
