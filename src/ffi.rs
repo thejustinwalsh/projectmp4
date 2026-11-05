@@ -16,7 +16,12 @@ use std::ffi::{c_char, c_void, CString};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::gl_context::GlContext;
+/// A GL context an [`Instance`] can re-make current before it frees GL objects.
+/// The headless [`crate::gl_context::GlContext`] and the preview window's
+/// context both implement it.
+pub trait MakeCurrent {
+    fn make_current(&self) -> Result<()>;
+}
 
 /// OpenGL symbol loader: given a NUL-terminated name, returns the function pointer.
 pub type LoadProc = unsafe extern "C" fn(name: *const c_char, user: *mut c_void) -> *mut c_void;
@@ -105,7 +110,7 @@ impl Channels {
 ///   Construct one with [`GlContext::create_instance`], not directly.
 pub struct Instance<'gl> {
     handle: sys::projectm_handle,
-    gl: &'gl GlContext,
+    gl: &'gl dyn MakeCurrent,
     /// Bumped by [`on_preset_switch_failed`]. Boxed so its address is stable
     /// across moves of the `Instance`; projectM holds that address as the
     /// callback's user data for the life of the instance.
@@ -134,9 +139,9 @@ impl<'gl> Instance<'gl> {
     /// [`GlContext::create_instance`] is the only caller; it has already made
     /// `gl` current. Holding the reference is what turns the context-currency
     /// invariant from a comment into something the type system carries.
-    pub(crate) fn new(gl: &'gl GlContext) -> Result<Instance<'gl>> {
+    pub(crate) fn new(gl: &'gl dyn MakeCurrent, loader: LoadProc) -> Result<Instance<'gl>> {
         let handle = unsafe {
-            sys::projectm_create_with_opengl_load_proc(Some(gl.loader()), std::ptr::null_mut())
+            sys::projectm_create_with_opengl_load_proc(Some(loader), std::ptr::null_mut())
         };
         if handle.is_null() {
             Err(Error::msg(

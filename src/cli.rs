@@ -28,24 +28,22 @@ enum Cmd {
         #[arg(default_value = "presets/profiles.toml")]
         out: PathBuf,
     },
-    /// Live preview window (not implemented yet).
-    Preview,
+    /// Play a track in a window with the presets and switch times `render` will use.
+    ///
+    /// Right/Left step to the next/previous preset (off the schedule until the
+    /// next planned switch), L locks the preset on screen, P prints its path
+    /// (pass it to `render --preset`), Esc quits. Title, art and watermark are
+    /// not drawn.
+    Preview(PlanCmd),
     /// Render an audio file to mp4.
     Render(RenderCmd),
 }
 
+/// What decides the plan: the same flags for `render` and `preview`, so the
+/// preview of a track is the render of it.
 #[derive(Args)]
-struct RenderCmd {
+struct PlanCmd {
     input: PathBuf,
-    /// Defaults to the file's title tag, then its file name.
-    #[arg(long)]
-    title: Option<String>,
-    /// Defaults to the file's artist tag.
-    #[arg(long)]
-    artist: Option<String>,
-    /// Cover art (jpeg or png), shown beside the title.
-    #[arg(long)]
-    art: Option<PathBuf>,
     #[arg(long, default_value = "deathstep")]
     profile: String,
     /// Use this .milk file instead of the profile's list; repeatable.
@@ -59,6 +57,36 @@ struct RenderCmd {
     /// Audio that drives the visuals: stems (falls back to mix) or mix.
     #[arg(long, value_parser = parse_driver)]
     driver: Option<DriverKind>,
+    /// Use only the first N seconds.
+    #[arg(long, value_parser = parse_limit)]
+    limit_seconds: Option<f64>,
+}
+
+impl PlanCmd {
+    fn args(self) -> RenderArgs {
+        let mut a = RenderArgs::new(self.input);
+        a.profile = self.profile;
+        a.presets = self.preset;
+        a.fps = self.fps;
+        a.driver = self.driver;
+        a.limit_seconds = self.limit_seconds;
+        a
+    }
+}
+
+#[derive(Args)]
+struct RenderCmd {
+    #[command(flatten)]
+    plan: PlanCmd,
+    /// Defaults to the file's title tag, then its file name.
+    #[arg(long)]
+    title: Option<String>,
+    /// Defaults to the file's artist tag.
+    #[arg(long)]
+    artist: Option<String>,
+    /// Cover art (jpeg or png), shown beside the title.
+    #[arg(long)]
+    art: Option<PathBuf>,
     /// Watermark artwork: word or sigil.
     #[arg(long, default_value = "word", value_parser = parse_style)]
     watermark_style: MarkStyle,
@@ -71,9 +99,6 @@ struct RenderCmd {
     /// Output path. Default: <input name>.mp4 in the current directory.
     #[arg(long)]
     out: Option<PathBuf>,
-    /// Render only the first N seconds.
-    #[arg(long, value_parser = parse_limit)]
-    limit_seconds: Option<f64>,
     /// Write the render plan as JSON to this path and exit without rendering.
     #[arg(long)]
     dump_plan: Option<PathBuf>,
@@ -107,7 +132,7 @@ pub fn run() -> i32 {
     let result = match cli.cmd {
         Cmd::Init => init(),
         Cmd::Rank { out } => rank(&out),
-        Cmd::Preview => Err(Error::msg("preview is not implemented yet")),
+        Cmd::Preview(c) => crate::preview::preview(&c.args()),
         Cmd::Render(c) => render_cmd(c),
     };
     match result {
@@ -137,20 +162,15 @@ fn rank(out: &std::path::Path) -> Result<()> {
 }
 
 fn render_cmd(c: RenderCmd) -> Result<()> {
-    let mut a = RenderArgs::new(c.input);
+    let mut a = c.plan.args();
     a.title = c.title;
     a.artist = c.artist;
     a.art = c.art;
-    a.profile = c.profile;
-    a.presets = c.preset;
-    a.fps = c.fps;
-    a.driver = c.driver;
     a.watermark_style = c.watermark_style;
     a.static_overlay = c.static_overlay;
     a.fast = c.fast;
     a.out = c.out;
     a.progress = true;
-    a.limit_seconds = c.limit_seconds;
     if let Some(path) = c.dump_plan {
         let plan = render_plan(&a)?;
         std::fs::write(&path, plan.to_json()).map_err(|e| Error::msg(format!("write {}: {e}", path.display())))?;

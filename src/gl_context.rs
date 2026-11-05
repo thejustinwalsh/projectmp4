@@ -10,7 +10,7 @@
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::sync::OnceLock;
 
-use crate::ffi::{Error, Instance, LoadProc, Result};
+use crate::ffi::{Error, Instance, LoadProc, MakeCurrent, Result};
 
 // ---------------------------------------------------------------------------
 // CGL (OpenGL.framework)
@@ -467,7 +467,7 @@ impl GlContext {
     /// ```
     pub fn create_instance(&self) -> Result<Instance<'_>> {
         self.ensure_current()?;
-        Instance::new(self)
+        Instance::new(self, self.loader())
     }
 
     /// `GL_VERSION` and `GL_RENDERER` of the live context, for diagnostics.
@@ -534,6 +534,18 @@ impl GlContext {
         self.fbo = 0;
         self.ctx = std::ptr::null_mut();
     }
+}
+
+impl MakeCurrent for GlContext {
+    fn make_current(&self) -> Result<()> {
+        GlContext::make_current(self)
+    }
+}
+
+/// The context-free proc loader, for a context this module did not create
+/// (the preview window's). Same function the headless context uses.
+pub fn proc_loader() -> LoadProc {
+    gl_load_proc
 }
 
 impl Drop for GlContext {
