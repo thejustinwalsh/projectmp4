@@ -74,7 +74,8 @@ fn ink_in_border(f: &[u8], m: u32) -> f64 {
 /// `black_outside`: columns outside this x range are painted black, so only a
 /// true centre crop (not a squash) yields a fully inked 180px square.
 fn fixture(name: &str, w: u32, h: u32, keep: Option<(u32, u32)>) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("projectmp4-overlay-{}", std::process::id()));
+    // Fixed directory under target/tmp: rewritten each run, never one per process.
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("overlay_fixtures");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(name);
     // Every channel >= 60 so every art pixel counts as ink.

@@ -1,17 +1,12 @@
 use projectmp4::audio::{normalise, normalise_with_ffmpeg};
 use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+#[path = "common/tmp.rs"]
+mod tmp;
+use tmp::Tmp;
+use std::path::Path;
 
-fn tmpdir() -> PathBuf {
-    static N: AtomicUsize = AtomicUsize::new(0);
-    let d = std::env::temp_dir().join(format!(
-        "projectmp4-normalise-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::SeqCst)
-    ));
-    std::fs::create_dir_all(&d).unwrap();
-    d
+fn tmpdir() -> Tmp {
+    Tmp::new("normalise")
 }
 
 /// (format tag, channels, sample rate) from the WAV `fmt ` chunk.
@@ -45,7 +40,7 @@ fn sha256_of_file(p: &str) -> String {
 
 #[test]
 fn normalises_mp3_to_48k_wav() {
-    let s = normalise(Path::new("samples/track.mp3"), &tmpdir()).unwrap();
+    let s = tmp::normalised("samples/track.mp3");
     assert_eq!(wav_sample_rate(&s.wav), 48_000);
     assert!((s.duration - 219.744).abs() < 0.05);
 }
@@ -120,15 +115,16 @@ fn ffmpeg_failure_after_writing_part_removes_it() {
 
 #[test]
 fn reads_suno_id3_tags() {
-    let s = normalise(Path::new("samples/track.mp3"), &tmpdir()).unwrap();
+    let s = tmp::normalised("samples/track.mp3");
     assert_eq!(s.title.as_deref(), Some("Sunday Console Rite"));
     assert_eq!(s.artist.as_deref(), Some("tjdubz"));
 }
 
 #[test]
 fn sha256_is_of_the_original_file_not_the_wav() {
-    let a = normalise(Path::new("samples/track.mp3"), &tmpdir()).unwrap();
-    let b = normalise(Path::new("samples/track.mp3"), &tmpdir()).unwrap();
+    let (da, db) = (tmpdir(), tmpdir());
+    let a = normalise(Path::new("samples/track.mp3"), &da).unwrap();
+    let b = normalise(Path::new("samples/track.mp3"), &db).unwrap();
     assert_eq!(a.sha256, b.sha256);
     assert_eq!(a.sha256, sha256_of_file("samples/track.mp3"));
     assert_ne!(a.sha256, sha256_of_file(a.wav.to_str().unwrap()));
@@ -136,7 +132,7 @@ fn sha256_is_of_the_original_file_not_the_wav() {
 
 #[test]
 fn m4a_without_tags_has_none() {
-    let s = normalise(Path::new("samples/three-note-signature.m4a"), &tmpdir()).unwrap();
+    let s = tmp::normalised("samples/three-note-signature.m4a");
     assert_eq!(s.title, None);
     assert_eq!(s.artist, None);
     assert_eq!(s.sha256, "14a2aeaf2cb59d4836e69bef8de4e45a9da2ee737be999f912ad9013ed4a752a");

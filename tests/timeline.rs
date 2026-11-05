@@ -1,23 +1,18 @@
 use projectmp4::audio::analysis::{analyse, DEFAULT_MODELS};
 use projectmp4::audio::timeline::{plan_switches, Cut};
 use projectmp4::audio::normalise::PIPELINE_RATE;
+#[path = "common/tmp.rs"]
+mod tmp;
+use tmp::Tmp;
 use projectmp4::audio::{normalise, Analysis, Driver, DriverKind};
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 const RAVEZILLA: &str = "samples/ravezilla.m4a";
 const THREE_NOTE_MOTIF: &str = "samples/three-note-motif.m4a";
 const THREE_NOTE_SIGNATURE: &str = "samples/three-note-signature.m4a";
 
 fn fixture(p: &str) -> (Analysis, Driver) {
-    static N: AtomicUsize = AtomicUsize::new(0);
-    let tmp = std::env::temp_dir().join(format!(
-        "projectmp4-timeline-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::SeqCst)
-    ));
-    std::fs::create_dir_all(&tmp).unwrap();
-    let src = normalise(Path::new(p), &tmp).unwrap();
+    let src = tmp::normalised(p);
     let a = analyse(&src, Path::new(DEFAULT_MODELS)).unwrap();
     let d = Driver::load(&src, Some(DriverKind::Mix)).unwrap();
     (a, d)
@@ -85,13 +80,7 @@ fn track_shorter_than_min_gap_yields_no_switches() {
 const BURST_AT: f64 = 20.0;
 
 fn synthetic(burst_hz: f64) -> (Analysis, Driver) {
-    static N: AtomicUsize = AtomicUsize::new(0);
-    let tmp = std::env::temp_dir().join(format!(
-        "projectmp4-timeline-synth-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::SeqCst)
-    ));
-    std::fs::create_dir_all(&tmp).unwrap();
+    let tmp = Tmp::new("timeline-synth");
     let rate = PIPELINE_RATE;
     let total = 40 * rate as usize;
     let mut pcm = Vec::with_capacity(total * 4);

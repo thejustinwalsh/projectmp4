@@ -1,19 +1,14 @@
 use projectmp4::audio::analysis::{analyse, analyse_with_cache_dir, DEFAULT_MODELS};
-use projectmp4::audio::{normalise, Source};
+#[path = "common/tmp.rs"]
+mod tmp;
+use tmp::Tmp;
+use projectmp4::audio::Source;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 const RAVEZILLA: &str = "samples/ravezilla.m4a";
 
-fn tmpdir() -> PathBuf {
-    static N: AtomicUsize = AtomicUsize::new(0);
-    let d = std::env::temp_dir().join(format!(
-        "projectmp4-analysis-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::SeqCst)
-    ));
-    std::fs::create_dir_all(&d).unwrap();
-    d
+fn tmpdir() -> Tmp {
+    Tmp::new("analysis")
 }
 
 fn models() -> &'static Path {
@@ -21,7 +16,7 @@ fn models() -> &'static Path {
 }
 
 fn source_for(p: &str) -> Source {
-    normalise(Path::new(p), &tmpdir()).unwrap()
+    tmp::normalised(p)
 }
 
 fn real_cache_entry(sha: &str) -> PathBuf {
@@ -31,7 +26,7 @@ fn real_cache_entry(sha: &str) -> PathBuf {
 }
 
 /// Cache root in a private tmpdir with `contents` at analysis/<sha>.json.
-fn cache_with(sha: &str, contents: &[u8]) -> PathBuf {
+fn cache_with(sha: &str, contents: &[u8]) -> Tmp {
     let root = tmpdir();
     std::fs::create_dir_all(root.join("analysis")).unwrap();
     std::fs::write(root.join("analysis").join(format!("{sha}.json")), contents).unwrap();

@@ -1,23 +1,18 @@
-use projectmp4::audio::{normalise, Driver, DriverKind, Source};
+#[path = "common/tmp.rs"]
+mod tmp;
+use tmp::Tmp;
+use projectmp4::audio::{Driver, DriverKind, Source};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 const RAVEZILLA: &str = "samples/ravezilla.m4a";
 const RAVEZILLA_FRAMES: usize = 8_277_120;
 
-fn tmpdir() -> PathBuf {
-    static N: AtomicUsize = AtomicUsize::new(0);
-    let d = std::env::temp_dir().join(format!(
-        "projectmp4-driver-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::SeqCst)
-    ));
-    std::fs::create_dir_all(&d).unwrap();
-    d
+fn tmpdir() -> Tmp {
+    Tmp::new("driver")
 }
 
 fn source_for(p: &str) -> Source {
-    normalise(Path::new(p), &tmpdir()).unwrap()
+    tmp::normalised(p)
 }
 
 /// Canonical 48 kHz stereo f32 WAV from interleaved samples.
@@ -79,7 +74,7 @@ fn build_cache(
 
 /// Synthetic cache root with manifest `frames` declared to match each stem.
 /// `completion` and `manifest_sha` let tests break one guard at a time.
-fn synthetic_cache(drums: &[f32], bass: &[f32], completion: &str, manifest_sha: &str) -> PathBuf {
+fn synthetic_cache(drums: &[f32], bass: &[f32], completion: &str, manifest_sha: &str) -> Tmp {
     synthetic_cache_declared(drums, bass, completion, manifest_sha, [drums.len() / 2, bass.len() / 2])
 }
 
@@ -90,7 +85,7 @@ fn synthetic_cache_declared(
     completion: &str,
     manifest_sha: &str,
     declared: [usize; 2],
-) -> PathBuf {
+) -> Tmp {
     let root = tmpdir();
     let bundle = root.join("stems/bundles").join(JOB);
     build_cache(&root, &bundle, JOB, drums, bass, completion, manifest_sha, declared);
@@ -99,8 +94,17 @@ fn synthetic_cache_declared(
 
 /// A 3-frame mix of 0.1s, distinct from any stem sum used below.
 fn synthetic_source() -> Source {
-    let wav = tmpdir().join("mix.wav");
-    write_wav(&wav, &[0.1; 6]);
+    // One wav for every caller; written once, never while another test reads it.
+    static WAV: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let wav = WAV
+        .get_or_init(|| {
+            let dir = tmp::scratch_root().join("driver_synthetic");
+            std::fs::create_dir_all(&dir).unwrap();
+            let wav = dir.join("mix.wav");
+            write_wav(&wav, &[0.1; 6]);
+            wav
+        })
+        .clone();
     Source { wav, sha256: SHA.into(), duration: 0.0, title: None, artist: None }
 }
 
