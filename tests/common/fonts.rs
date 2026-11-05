@@ -51,7 +51,12 @@ fn plant_decoy_oswald(db: &mut fontdb::Database) {
 
 /// Production font-system construction, but with a decoy "Oswald" as the host's font.
 pub fn title_with_decoy_host_oswald(title: &str) -> TitleInk {
-    tile(&mut font_system_with_host(plant_decoy_oswald), FONT_FAMILY, title, None)
+    let mut fs = font_system_with_host(plant_decoy_oswald);
+    // The premise: the decoy must actually be in the database (2 embedded + 1 decoy),
+    // otherwise this renders the production font and the caller's comparison is vacuous.
+    let n = fs.db().faces().filter(|f| f.families.iter().any(|(n, _)| n == "Oswald")).count();
+    assert_eq!(n, 3, "decoy was not planted: {n} faces named Oswald (expected 2 embedded + 1 decoy)");
+    tile(&mut fs, FONT_FAMILY, title, None)
 }
 
 /// The same string through a FontSystem whose database holds ONLY the two Oswald faces.

@@ -6,7 +6,9 @@ use projectmp4::gl_context::GlContext;
 use projectmp4::gl_overlay::GlOverlay;
 use projectmp4::render::{MarkStyle, Overlay};
 use std::ffi::c_void;
-use std::path::PathBuf;
+#[path = "common/tmp.rs"]
+mod tmp;
+use tmp::Tmp;
 
 const W: u32 = 1920;
 const H: u32 = 1080;
@@ -81,22 +83,15 @@ fn flip_rows(px: &[u8]) -> Vec<u8> {
     px.chunks_exact(row).rev().flatten().copied().collect()
 }
 
-/// Removes the file when dropped, on every exit path.
-struct TempFile(PathBuf);
-impl Drop for TempFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
 #[test]
 fn the_gpu_overlay_matches_the_cpu_composite_over_a_gradient() {
     // Cover art: opaque, so it exercises the non-text path.
-    let art = TempFile(std::env::temp_dir().join(format!("projectmp4-gl-overlay-art-{}.png", std::process::id())));
+    let dir = Tmp::new("gl-overlay");
+    let art = dir.join("art.png");
     let img = image::RgbaImage::from_fn(180, 180, |x, y| image::Rgba([(x * 255 / 179) as u8, (y * 255 / 179) as u8, 90, 255]));
-    img.save(&art.0).unwrap();
+    img.save(&art).unwrap();
 
-    let overlay = Overlay::new("Oracle Title", Some("An Artist"), Some(&art.0), MarkStyle::Word, true).unwrap();
+    let overlay = Overlay::new("Oracle Title", Some("An Artist"), Some(&art), MarkStyle::Word, true).unwrap();
     let gl = GlContext::new(W, H).unwrap();
     let mut gpu_overlay = GlOverlay::new(&overlay, W, H).unwrap();
 

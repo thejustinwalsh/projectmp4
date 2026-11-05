@@ -19,7 +19,7 @@ pub fn scratch_root() -> PathBuf {
 }
 
 /// A unique directory under `target/tmp`, removed on drop (including during a panic unwind).
-pub struct Tmp(PathBuf);
+pub struct Tmp(pub PathBuf);
 
 impl Tmp {
     pub fn new(tag: &str) -> Tmp {

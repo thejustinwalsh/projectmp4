@@ -1,5 +1,7 @@
 #[path = "common/fonts.rs"]
 mod fonts;
+#[path = "common/tmp.rs"]
+mod tmp;
 use projectmp4::render::overlay::{ART_PX, BLOCK_PAD, SAFE_MARGIN};
 use projectmp4::render::{MarkStyle, Overlay};
 use std::path::{Path, PathBuf};
@@ -75,7 +77,7 @@ fn ink_in_border(f: &[u8], m: u32) -> f64 {
 /// true centre crop (not a squash) yields a fully inked 180px square.
 fn fixture(name: &str, w: u32, h: u32, keep: Option<(u32, u32)>) -> PathBuf {
     // Fixed directory under target/tmp: rewritten each run, never one per process.
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("overlay_fixtures");
+    let dir = tmp::scratch_root().join("overlay_fixtures");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(name);
     // Every channel >= 60 so every art pixel counts as ink.
@@ -246,6 +248,7 @@ fn halo_reaches_about_six_pixels_and_no_further_than_the_pad() {
     let darkened = |d: usize| ring[d].iter().filter(|&&(x, y)| lum_at(&white, x, y) < 250).count() as f64 / ring[d].len() as f64;
     let d6 = darkened(6);
     assert!(d6 > 0.5, "only {:.0}% of pixels 6px from ink are darkened", d6 * 100.0);
+    assert!(!ring[12].is_empty(), "probe window saturated before 12px, so the check below would be vacuous");
     assert!(ring[12].iter().all(|&(x, y)| lum_at(&white, x, y) == 255), "halo reaches 12px, past its pad");
 }
 
@@ -307,7 +310,10 @@ fn short_buffers_and_odd_sizes_never_panic_or_write_out_of_bounds() {
     let mut short = vec![7u8; 100];
     o.draw(&mut short, 1920, 1080, 1.0);
     assert!(short.iter().all(|&b| b == 7));
-    // Dimensions whose product wraps must be rejected, not sliced out of bounds.
+    // Absurd dimensions are a no-op. NOTE this does not isolate the `checked_mul` guard: on a
+    // 64-bit target no allocatable buffer can reach it (it is equivalent to the `need > 0` and
+    // length checks there, and only distinguishable on a 32-bit target), so this is a third
+    // short-buffer row, not coverage of the overflow check.
     let mut one = vec![7u8; 16];
     o.draw(&mut one, 1 << 31, 1 << 31, 1.0);
     assert!(one.iter().all(|&b| b == 7));
@@ -320,7 +326,6 @@ fn short_buffers_and_odd_sizes_never_panic_or_write_out_of_bounds() {
     let (w, h, m) = (300u32, 200u32, SAFE_MARGIN);
     let mut f = vec![7u8; (w * h * 4) as usize];
     o.draw(&mut f, w, h, 1.0);
-    assert_eq!(f.len(), (w * h * 4) as usize);
     assert!(f.iter().any(|&b| b != 7), "nothing drawn at 300x200");
     for y in 0..h {
         for x in 0..w {
@@ -489,6 +494,9 @@ fn bass_selects_the_watermark_tile() {
     assert_eq!(o.mark_index(0.0), 0);
     assert_eq!(o.mark_index(1.0), last);
     assert_eq!(o.mark_index(2.0), last, "clamped");
+    // Equivalent mutants, kept as documentation: removing the clamp's lower bound still gives 0
+    // (a negative float `as usize` saturates to 0), and so does removing the `is_nan` guard
+    // (`NaN as usize` is 0). The clamp's upper bound is what the `2.0` row above kills.
     assert_eq!(o.mark_index(-1.0), 0, "clamped");
     assert_eq!(o.mark_index(f32::NAN), 0);
     let mid = o.mark_index(0.5);
@@ -497,6 +505,8 @@ fn bass_selects_the_watermark_tile() {
 
     let s = Overlay::new("T", None, None, MarkStyle::Word, false).unwrap();
     assert_eq!(s.mark_layers(W, H).len(), 1);
+    // Equivalent mutant: a static overlay has one tile, so `bass * 0` is 0 whether or not
+    // `reactive` is consulted; this pins the single-tile arity, not the flag.
     assert_eq!(s.mark_index(1.0), 0, "a static overlay ignores bass");
 }
 

@@ -140,6 +140,10 @@ fn m4a_without_tags_has_none() {
 
 #[test]
 fn missing_ffmpeg_is_a_clear_error() {
-    let e = normalise_with_ffmpeg(Path::new("samples/track.mp3"), &tmpdir(), "ffmpeg-does-not-exist");
-    assert!(e.unwrap_err().to_string().contains("ffmpeg"));
+    let msg = normalise_with_ffmpeg(Path::new("samples/track.mp3"), &tmpdir(), "ffmpeg-does-not-exist")
+        .unwrap_err()
+        .to_string();
+    // Not `contains("ffmpeg")`: the program name we passed already satisfies that.
+    assert!(msg.contains("failed to run"), "{msg}");
+    assert!(msg.contains("No such file or directory"), "the OS reason did not reach the user: {msg}");
 }

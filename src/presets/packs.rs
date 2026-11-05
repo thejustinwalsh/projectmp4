@@ -264,11 +264,28 @@ mod tests {
         Source { name: name.into(), repo: "/nonexistent".into(), commit: "0".repeat(40) }
     }
 
-    fn tmp(tag: &str) -> PathBuf {
+    /// A scratch directory removed in `Drop`, so a failing assertion cannot leak it
+    /// (the guard test in `tests/tmp_guard.rs` scans this file for unguarded temp dirs).
+    struct TmpDir(PathBuf);
+
+    impl std::ops::Deref for TmpDir {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn tmp(tag: &str) -> TmpDir {
         let d = std::env::temp_dir().join(format!("projectmp4-unit-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        d
+        TmpDir(d)
     }
 
     #[test]
@@ -279,7 +296,6 @@ mod tests {
         let err = Packs::ensure_from(&cache, &entries).unwrap_err().to_string();
         assert!(err.contains(COTC), "{err}");
         assert!(Packs::ensure_from(&cache, &[]).is_err());
-        let _ = std::fs::remove_dir_all(&cache);
     }
 
     /// A one-commit local repository to fetch from, so the test needs no network.
@@ -322,7 +338,6 @@ mod tests {
         std::fs::remove_dir_all(&dest).unwrap();
         ensure_source(&cache, &s).unwrap();
         assert!(dest.join("a.milk").exists());
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

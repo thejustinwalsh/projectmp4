@@ -396,6 +396,9 @@ fn a_fresh_pacer_ignores_positions_before_the_start() {
     let mut p = Pacer::new(60);
     assert!(p.due(-1.0).is_none());
     assert!(p.due(f64::NAN).is_none());
+    // Equivalent mutant for +inf only: without the `is_finite` guard, `inf as u64` saturates to
+    // u64::MAX and the later `frame == u64::MAX` check returns None anyway. NaN (above) and
+    // -inf (via `secs < 0.0`) are what keep the guard live.
     assert!(p.due(f64::INFINITY).is_none());
     let d = p.due(0.0).expect("frame 0 is still due");
     assert_eq!((d.frame, d.dropped), (0, 0));
