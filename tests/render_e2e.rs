@@ -245,6 +245,11 @@ fn output_is_upright_not_flipped() {
     // correct, so (1) alone would not catch it.
     let mut a = RenderArgs::new(SIGNATURE);
     a.presets = vec![fixture("top_line.milk")];
+    // The clip is 12.01 s with one soft cut at 8.46 s. projectM then crossfades for 3 s
+    // with a random transition shader, which can blend the square away (samples at
+    // 10 s and 11 s did, about half the time). Stop before the cut: the square is
+    // only a meaningful assertion outside a transition.
+    a.limit_seconds = Some(7.9);
     a.out = Some(shared_dir("render_e2e_upright").join("out.mp4"));
     a.fast = true;
     let r = render_report(&a).unwrap();
@@ -258,7 +263,7 @@ fn output_is_upright_not_flipped() {
         .unwrap();
     assert!(o.status.success());
     let frames: Vec<&[u8]> = o.stdout.chunks(1920 * 1080).collect();
-    assert!(frames.len() >= 10, "{} sampled frames", frames.len());
+    assert!(frames.len() >= 7, "{} sampled frames", frames.len());
     // Skip frame 0: the square has not developed yet. Anything later must be steady.
     for (i, f) in frames.iter().enumerate().skip(1) {
         let (up, down) = (white(f, 560..1360, 40..420), white(f, 560..1360, 660..1040));

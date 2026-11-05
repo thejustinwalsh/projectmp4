@@ -18,6 +18,7 @@
 //! preset that renders black (that needs the readback too).
 
 use crate::audio::timeline::Cut;
+use winit::keyboard::{KeyCode, PhysicalKey};
 use crate::ffi::{Error, Instance, MakeCurrent, Result};
 use crate::gl_context::proc_loader;
 use crate::render::plan::{prepare, RenderArgs, RenderPlan};
@@ -38,46 +39,80 @@ pub struct Load {
 
 /// The plan's preset schedule plus the user's overrides.
 ///
-/// A scheduled switch always lands on the plan's preset for the new segment,
-/// so stepping off the schedule lasts only until the next switch. Locking
-/// freezes the display: switches pass unapplied, and unlocking does not jump.
+/// The schedule is the render's: a cursor walks the pool, each switch takes
+/// the pool entry under the cursor, and a preset projectM cannot load is
+/// skipped for good with the cursor moving on (`loop.rs` `Playlist::advance`).
+/// Following the cursor, not `preset_sequence`, keeps every later preset the
+/// same as the render's after a skip. Two things preview cannot know and the
+/// render does: a skip it never loads (switches passed while locked, or
+/// stepped over by a stall) and a preset the render sets aside as black.
+///
+/// A scheduled switch always lands on the schedule's preset, so stepping off
+/// lasts until the next switch. Locking freezes the display: switches pass
+/// (the cursor still moves) but are not shown, and unlocking does not jump.
 #[derive(Debug, Clone)]
 pub struct PreviewState {
-    /// The plan's preset for each segment: the opening one, then one per switch.
-    sequence: Vec<PathBuf>,
-    /// Stepping order. `sequence[i]` is `pool[i % pool.len()]` in a real plan.
     pool: Vec<PathBuf>,
     /// First frame of each segment after the first, exactly as the render computes them.
     switch_at: Vec<u64>,
     smooth: Vec<bool>,
     /// Segment the schedule is in at the latest frame seen.
     segment: usize,
-    /// Index into `pool` of the preset on screen.
+    /// Pool index the next scheduled load takes (before skipping unloadable ones).
+    cursor: usize,
+    /// Pool index the schedule shows now.
+    planned: usize,
+    /// Pool index on screen.
     shown: usize,
     locked: bool,
+    unloadable: Vec<bool>,
+    last_smooth: bool,
+    /// Direction of the latest manual step, for skipping past one that will not load.
+    forward: bool,
 }
 
 impl PreviewState {
     pub fn from_plan(plan: &RenderPlan) -> Result<PreviewState> {
-        if plan.pool.is_empty() || plan.preset_sequence.is_empty() {
+        let n = plan.pool.len();
+        if n == 0 || plan.preset_sequence.is_empty() {
             return Err(Error::msg("the plan has no presets to preview"));
         }
+        // The cursor reproduces the sequence only if the plan is the pool walked in order.
+        if let Some(i) = plan.preset_sequence.iter().enumerate().position(|(i, p)| *p != plan.pool[i % n]) {
+            return Err(Error::msg(format!(
+                "the plan's preset {i} is not the pool's entry {}; preview cannot reproduce it",
+                i % n
+            )));
+        }
         let mut s = PreviewState {
-            sequence: plan.preset_sequence.clone(),
             pool: plan.pool.clone(),
             switch_at: switch_frames(plan),
             smooth: plan.switches.iter().map(|s| s.cut == Cut::Soft).collect(),
             segment: 0,
+            cursor: 0,
+            planned: 0,
             shown: 0,
             locked: false,
+            unloadable: vec![false; n],
+            last_smooth: false,
+            forward: true,
         };
-        s.shown = s.pool_index(0);
+        s.planned = s.pick().expect("a fresh pool has no unloadable entry");
+        s.shown = s.planned;
         Ok(s)
     }
 
-    fn pool_index(&self, segment: usize) -> usize {
-        let want = &self.sequence[segment.min(self.sequence.len() - 1)];
-        self.pool.iter().position(|p| p == want).unwrap_or(0)
+    /// The pool entry under the cursor, passing over unloadable ones. Moves the cursor.
+    fn pick(&mut self) -> Option<usize> {
+        let n = self.pool.len();
+        for _ in 0..n {
+            let i = self.cursor % n;
+            self.cursor += 1;
+            if !self.unloadable[i] {
+                return Some(i);
+            }
+        }
+        None
     }
 
     pub fn current(&self) -> &Path {
@@ -90,40 +125,75 @@ impl PreviewState {
 
     /// True when what is on screen is not what the render will show now.
     pub fn off_schedule(&self) -> bool {
-        self.shown != self.pool_index(self.segment)
+        self.shown != self.planned
     }
 
     /// Call once per drawn frame with its index. Returns the preset to load
     /// when the schedule has entered a new segment. If several switches went
-    /// by (frames were dropped), only the one now due is returned.
+    /// by (frames were dropped), the cursor passes each but only the one now
+    /// due is returned. A frame earlier than one already seen is ignored.
     pub fn on_frame(&mut self, frame: u64) -> Option<Load> {
+        // A frame before the segment already reached lands in `segment <= self.segment`.
         let segment = self.switch_at.partition_point(|&f| f <= frame);
-        if segment == self.segment {
+        if segment <= self.segment {
             return None;
         }
-        let smooth = segment > 0 && self.smooth.get(segment - 1).copied().unwrap_or(false);
+        for _ in self.segment..segment {
+            if let Some(i) = self.pick() {
+                self.planned = i;
+            }
+        }
+        self.last_smooth = self.smooth.get(segment - 1).copied().unwrap_or(false);
         self.segment = segment;
         if self.locked {
             return None;
         }
-        self.shown = self.pool_index(segment);
+        self.shown = self.planned;
+        Some(Load { path: self.pool[self.shown].clone(), smooth: self.last_smooth })
+    }
+
+    /// projectM could not load what [`current`](Self::current) names. Sets it
+    /// aside for good and returns the preset to try instead: the cursor's next
+    /// if it was the scheduled one, else the next in the stepping direction.
+    /// `None` when nothing is left.
+    pub fn load_failed(&mut self) -> Option<Load> {
+        self.unloadable[self.shown] = true;
+        let smooth = if self.shown == self.planned {
+            self.planned = self.pick()?;
+            self.shown = self.planned;
+            self.last_smooth
+        } else {
+            self.step(self.forward)?;
+            true
+        };
         Some(Load { path: self.pool[self.shown].clone(), smooth })
     }
 
-    fn step(&mut self, forward: bool) -> Load {
+    fn step(&mut self, forward: bool) -> Option<()> {
         let n = self.pool.len();
-        self.shown = if forward { (self.shown + 1) % n } else { (self.shown + n - 1) % n };
+        self.forward = forward;
+        for _ in 0..n {
+            self.shown = if forward { (self.shown + 1) % n } else { (self.shown + n - 1) % n };
+            if !self.unloadable[self.shown] {
+                return Some(());
+            }
+        }
+        None
+    }
+
+    fn manual(&mut self, forward: bool) -> Load {
+        let _ = self.step(forward);
         Load { path: self.pool[self.shown].clone(), smooth: true }
     }
 
-    /// The pool's next preset, leaving the schedule.
+    /// The pool's next loadable preset, leaving the schedule.
     pub fn next(&mut self) -> Load {
-        self.step(true)
+        self.manual(true)
     }
 
-    /// The pool's previous preset, leaving the schedule.
+    /// The pool's previous loadable preset, leaving the schedule.
     pub fn previous(&mut self) -> Load {
-        self.step(false)
+        self.manual(false)
     }
 
     pub fn lock(&mut self) {
@@ -136,6 +206,33 @@ impl PreviewState {
 
     pub fn toggle_lock(&mut self) {
         self.locked = !self.locked;
+    }
+}
+
+/// What a key press asks the window to do. [`key_action`] decides; the window
+/// carries it out.
+#[derive(Debug, Clone, PartialEq)]
+pub enum KeyAction {
+    Quit,
+    Load(Load),
+    /// Print the current preset's path (so it can be pinned with `--preset`).
+    Print(PathBuf),
+    /// Lock changed; the value is the new state.
+    Lock(bool),
+    Ignored,
+}
+
+pub fn key_action(code: KeyCode, state: &mut PreviewState) -> KeyAction {
+    match code {
+        KeyCode::Escape => KeyAction::Quit,
+        KeyCode::ArrowRight => KeyAction::Load(state.next()),
+        KeyCode::ArrowLeft => KeyAction::Load(state.previous()),
+        KeyCode::KeyL => {
+            state.toggle_lock();
+            KeyAction::Lock(state.is_locked())
+        }
+        KeyCode::KeyP => KeyAction::Print(state.current().to_owned()),
+        _ => KeyAction::Ignored,
     }
 }
 
@@ -172,9 +269,10 @@ impl Pacer {
         if !secs.is_finite() || secs < 0.0 {
             return None;
         }
-        // The epsilon keeps 1/60 * 60 from landing a hair under 1.
+        // The epsilon keeps 123/60 * 60 from landing a hair under 123.
         let frame = (secs * self.fps + 1e-9).floor() as u64;
-        if frame < self.next {
+        // A saturated cast is a position no track has, and `frame + 1` would overflow.
+        if frame == u64::MAX || frame < self.next {
             return None;
         }
         let dropped = frame - self.next;
@@ -336,7 +434,6 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::{Window, WindowId};
 
@@ -420,18 +517,23 @@ struct App<'a> {
 }
 
 impl App<'_> {
-    /// Loads `load`; a preset projectM rejects is passed over for the pool's next, as the render does.
+    /// Loads `load`; a preset projectM rejects is set aside and the state names the next, as the render does.
     fn load(&mut self, mut load: Load) {
-        for _ in 0..self.state.pool.len() {
+        loop {
             match self.pm.load_preset_file(&load.path, load.smooth) {
                 Ok(()) => return,
                 Err(e) => {
                     eprintln!("preview: skipping {}: {e}", load.path.display());
-                    load = self.state.next();
+                    match self.state.load_failed() {
+                        Some(next) => load = next,
+                        None => {
+                            eprintln!("preview: no preset in the pool will load");
+                            return;
+                        }
+                    }
                 }
             }
         }
-        eprintln!("preview: no preset in the pool will load");
     }
 
     fn draw(&mut self, due: Due) -> Result<()> {
@@ -478,22 +580,12 @@ impl App<'_> {
     }
 
     fn key(&mut self, code: KeyCode, el: &ActiveEventLoop) {
-        match code {
-            KeyCode::Escape => el.exit(),
-            KeyCode::ArrowRight => {
-                let l = self.state.next();
-                self.load(l);
-            }
-            KeyCode::ArrowLeft => {
-                let l = self.state.previous();
-                self.load(l);
-            }
-            KeyCode::KeyL => {
-                self.state.toggle_lock();
-                eprintln!("preview: {}", if self.state.is_locked() { "locked" } else { "unlocked" });
-            }
-            KeyCode::KeyP => println!("{}", self.state.current().display()),
-            _ => {}
+        match key_action(code, &mut self.state) {
+            KeyAction::Quit => el.exit(),
+            KeyAction::Load(l) => self.load(l),
+            KeyAction::Print(p) => println!("{}", p.display()),
+            KeyAction::Lock(on) => eprintln!("preview: {}", if on { "locked" } else { "unlocked" }),
+            KeyAction::Ignored => {}
         }
     }
 }

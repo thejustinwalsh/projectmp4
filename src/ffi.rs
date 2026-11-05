@@ -101,13 +101,16 @@ impl Channels {
 ///   that closes over per-context state and `Instance` becomes a true
 ///   per-process singleton.
 /// - Holds a raw pointer, so it is `!Send` and `!Sync`.
-/// - The borrow of the [`GlContext`] this instance was created against does
-///   double duty: it stops the context being dropped first, *and* it lets
-///   `Drop` make the context current again before `projectm_destroy`. Drop
-///   order alone is not enough, because tearing down some *other* `GlContext`
-///   in between leaves no context current at all, and projectM's `glDelete*`
-///   calls then silently become no-ops that leak GPU objects.
-///   Construct one with [`GlContext::create_instance`], not directly.
+/// - The borrow of the context (anything implementing [`MakeCurrent`]: the
+///   headless [`crate::gl_context::GlContext`] or the preview window's) this
+///   instance was created against does double duty: it stops the context being
+///   dropped first, *and* it lets `Drop` make the context current again before
+///   `projectm_destroy`. Drop order alone is not enough, because tearing down
+///   some *other* context in between leaves no context current at all, and
+///   projectM's `glDelete*` calls then silently become no-ops that leak GPU
+///   objects. The dynamic call happens only in `Drop`, never per frame.
+///   Construct one with [`crate::gl_context::GlContext::create_instance`] (or,
+///   for the preview window, `Instance::new` from inside the crate).
 pub struct Instance<'gl> {
     handle: sys::projectm_handle,
     gl: &'gl dyn MakeCurrent,
@@ -136,8 +139,8 @@ unsafe extern "C" fn on_preset_switch_failed(
 }
 
 impl<'gl> Instance<'gl> {
-    /// [`GlContext::create_instance`] is the only caller; it has already made
-    /// `gl` current. Holding the reference is what turns the context-currency
+    /// [`crate::gl_context::GlContext::create_instance`] and the preview window
+    /// are the only callers; each has already made `gl` current. Holding the reference is what turns the context-currency
     /// invariant from a comment into something the type system carries.
     pub(crate) fn new(gl: &'gl dyn MakeCurrent, loader: LoadProc) -> Result<Instance<'gl>> {
         let handle = unsafe {

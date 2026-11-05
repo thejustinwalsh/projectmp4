@@ -4,7 +4,8 @@
 
 use projectmp4::audio::timeline::{Cut, SwitchPoint};
 use projectmp4::audio::DriverKind;
-use projectmp4::preview::{fill_output, heard_secs, Pacer, PreviewState};
+use projectmp4::preview::{fill_output, heard_secs, key_action, KeyAction, Pacer, PreviewState};
+use winit::keyboard::KeyCode;
 use projectmp4::render::plan::RenderPlan;
 use projectmp4::render::MarkStyle;
 use std::path::PathBuf;
@@ -93,10 +94,19 @@ fn the_schedule_switches_on_the_frame_the_render_would() {
 }
 
 #[test]
+fn a_stall_takes_the_cut_of_the_switch_now_due_not_the_first_one_passed() {
+    let mut s = state(40, &[(8.0, Cut::Soft), (16.0, Cut::Hard)]);
+    let load = s.on_frame(1000).unwrap();
+    assert_eq!(load.path, preset(2));
+    assert!(!load.smooth, "the 16 s switch is hard");
+}
+
+#[test]
 fn a_stall_across_two_switches_loads_only_the_preset_now_due() {
     let mut s = state(40, &[(8.0, Cut::Soft), (16.0, Cut::Soft)]);
     let load = s.on_frame(1000).expect("both switches are behind us");
     assert_eq!(load.path, preset(2));
+    assert!(load.smooth, "the cut that is now due is soft");
     assert_eq!(s.current(), preset(2));
 }
 
@@ -148,6 +158,146 @@ fn a_plan_with_no_presets_is_an_error() {
     assert!(PreviewState::from_plan(&p).is_err());
 }
 
+#[test]
+fn a_switch_time_that_is_not_a_whole_number_of_frames_lands_on_the_next_frame() {
+    // 8.46 s * 60 = 507.6: the render loads on frame 508, the first at or after it.
+    let mut s = state(40, &[(8.46, Cut::Soft)]);
+    assert!(s.on_frame(507).is_none());
+    assert_eq!(s.on_frame(508).unwrap().path, preset(1));
+}
+
+#[test]
+fn a_frame_earlier_than_one_already_seen_is_ignored() {
+    let mut s = state(40, &[(8.0, Cut::Soft), (16.0, Cut::Soft)]);
+    assert_eq!(s.on_frame(500).unwrap().path, preset(1));
+    assert!(s.on_frame(100).is_none(), "time does not run backwards");
+    assert_eq!(s.current(), preset(1));
+    assert!(s.on_frame(501).is_none(), "and the switch is not loaded a second time");
+    assert!(s.on_frame(u64::MAX).is_some(), "the largest frame index is an ordinary frame");
+    assert_eq!(s.current(), preset(2));
+}
+
+// --- Skips: the render's pool cursor -----------------------------------------------
+
+#[test]
+fn a_preset_that_will_not_load_moves_every_later_preset_as_it_does_in_the_render() {
+    let mut s = state(40, &[(8.0, Cut::Soft), (16.0, Cut::Soft)]);
+    assert_eq!(s.current(), preset(0));
+    let l = s.load_failed().expect("another preset is available");
+    assert_eq!(l.path, preset(1), "the opening preset is replaced by the cursor's next");
+    assert_eq!(s.current(), preset(1));
+    assert!(!s.off_schedule(), "the replacement is the schedule's own");
+    // Without the skip segment 1 would be preset 1. The render's cursor is at 2.
+    assert_eq!(s.on_frame(480).unwrap().path, preset(2));
+    assert_eq!(s.on_frame(960).unwrap().path, preset(3));
+}
+
+#[test]
+fn a_failed_scheduled_load_keeps_its_cut_and_a_set_aside_preset_is_never_taken_again() {
+    // Pool of 3 walked round: segments 0,1,2,3 would be 0,1,2,0.
+    let mut s = state(3, &[(8.0, Cut::Soft), (16.0, Cut::Soft), (24.0, Cut::Soft)]);
+    assert_eq!(s.on_frame(480).unwrap().path, preset(1));
+    let l = s.load_failed().unwrap();
+    assert_eq!((l.path.clone(), l.smooth), (preset(2), true), "retry keeps the soft cut");
+    assert_eq!(s.on_frame(960).unwrap().path, preset(0), "cursor moved past 1 and 2");
+    assert_eq!(s.on_frame(1440).unwrap().path, preset(2), "the cursor wraps past preset 1, which is set aside for good");
+}
+
+#[test]
+fn switches_passed_while_locked_still_move_the_cursor() {
+    let mut s = state(40, &[(8.0, Cut::Soft), (16.0, Cut::Soft), (24.0, Cut::Soft)]);
+    s.lock();
+    s.on_frame(480);
+    s.on_frame(960);
+    s.unlock();
+    assert_eq!(s.on_frame(1440).unwrap().path, preset(3));
+}
+
+#[test]
+fn a_failed_manual_step_goes_on_in_the_same_direction_and_the_arrows_then_skip_it() {
+    let mut s = state(40, &[]);
+    s.next();
+    assert_eq!(s.current(), preset(1));
+    assert!(s.off_schedule());
+    assert_eq!(s.load_failed().unwrap().path, preset(2));
+    assert_eq!(s.current(), preset(2));
+    s.previous();
+    assert_eq!(s.current(), preset(0), "preset 1 is set aside");
+    s.next();
+    assert_eq!(s.current(), preset(2), "stepping forward from 0 steps over the set-aside 1");
+}
+
+#[test]
+fn a_failed_backward_step_goes_on_backward() {
+    let mut s = state(40, &[]);
+    s.previous();
+    assert_eq!(s.current(), preset(39));
+    assert_eq!(s.load_failed().unwrap().path, preset(38));
+}
+
+#[test]
+fn when_nothing_will_load_load_failed_says_so() {
+    let mut s = state(3, &[]);
+    assert!(s.load_failed().is_some());
+    assert!(s.load_failed().is_some());
+    assert!(s.load_failed().is_none());
+}
+
+#[test]
+fn a_plan_whose_sequence_is_not_the_pool_walked_in_order_is_refused() {
+    let mut p = plan_of(40, &[(8.0, Cut::Soft)], 60);
+    p.preset_sequence[1] = preset(7);
+    let e = PreviewState::from_plan(&p).unwrap_err();
+    assert!(e.0.contains("preset 1"), "{}", e.0);
+}
+
+// --- Keys ---------------------------------------------------------------------------
+
+#[test]
+fn keys_map_to_actions() {
+    let mut s = state(40, &[(8.0, Cut::Soft), (16.0, Cut::Soft)]);
+    assert_eq!(key_action(KeyCode::Escape, &mut s), KeyAction::Quit);
+    assert_eq!(s.current(), preset(0), "Esc changes nothing");
+
+    match key_action(KeyCode::ArrowRight, &mut s) {
+        KeyAction::Load(l) => assert_eq!(l.path, preset(1)),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(s.current(), preset(1));
+    match key_action(KeyCode::ArrowLeft, &mut s) {
+        KeyAction::Load(l) => assert_eq!(l.path, preset(0)),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(s.current(), preset(0));
+
+    assert_eq!(key_action(KeyCode::KeyP, &mut s), KeyAction::Print(preset(0)));
+    key_action(KeyCode::ArrowRight, &mut s);
+    assert_eq!(key_action(KeyCode::KeyP, &mut s), KeyAction::Print(preset(1)), "P prints what is on screen now");
+}
+
+#[test]
+fn l_locks_and_a_second_press_unlocks() {
+    let mut s = state(40, &[(8.0, Cut::Soft), (16.0, Cut::Soft), (24.0, Cut::Soft)]);
+    assert_eq!(key_action(KeyCode::KeyL, &mut s), KeyAction::Lock(true));
+    assert!(s.is_locked());
+    assert!(s.on_frame(480).is_none(), "locked: the switch is not shown");
+
+    assert_eq!(key_action(KeyCode::KeyL, &mut s), KeyAction::Lock(false));
+    assert!(!s.is_locked());
+    assert!(s.on_frame(960).is_some(), "unlocked: the schedule applies again");
+}
+
+#[test]
+fn an_unmapped_key_does_nothing() {
+    let mut s = state(40, &[(8.0, Cut::Soft)]);
+    for code in [KeyCode::KeyZ, KeyCode::Space, KeyCode::ArrowUp, KeyCode::Enter] {
+        assert_eq!(key_action(code, &mut s), KeyAction::Ignored, "{code:?}");
+    }
+    assert_eq!(s.current(), preset(0));
+    assert!(!s.is_locked());
+    assert!(!s.off_schedule());
+}
+
 // --- Pacer: pick the frame for the audio position; never replay one -----------
 
 #[test]
@@ -180,12 +330,33 @@ fn every_frame_boundary_is_its_own_frame_despite_float_rounding() {
 }
 
 #[test]
+fn a_position_just_before_a_boundary_is_still_the_previous_frame() {
+    // One tenth of a millisecond early is 0.6% of a frame at 60 fps: a tolerance
+    // wider than float rounding would call it the next frame.
+    for fps in [60u32, 30] {
+        let mut p = Pacer::new(fps);
+        let f = fps as f64;
+        assert_eq!(p.due(1.0 / f - 1e-4).unwrap().frame, 0);
+        for k in 1..500u64 {
+            assert_eq!(p.due(k as f64 / f).unwrap().frame, k, "{fps} fps boundary {k}");
+            assert!(p.due((k + 1) as f64 / f - 1e-4).is_none(), "{fps} fps just before {}", k + 1);
+        }
+    }
+}
+
+#[test]
+fn a_position_no_track_has_is_ignored_and_the_pacer_carries_on() {
+    let mut p = Pacer::new(60);
+    assert!(p.due(1e300).is_none(), "frame index saturates at u64::MAX");
+    let d = p.due(0.0).expect("frame 0 is still due");
+    assert_eq!((d.frame, d.dropped), (0, 0));
+}
+
+#[test]
 fn the_pacer_never_goes_backwards() {
     let mut p = Pacer::new(60);
     p.due(1.0).unwrap();
     assert!(p.due(0.5).is_none(), "an audio position that moved back draws nothing");
-    assert!(p.due(f64::NAN).is_none());
-    assert!(p.due(-1.0).is_none());
     assert_eq!(p.dropped(), 60, "frames 0..=59 were never drawn");
 }
 

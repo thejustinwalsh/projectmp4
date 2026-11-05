@@ -445,7 +445,7 @@ impl GlContext {
     /// The GL proc loader handed to libprojectM. Exposed for a second context
     /// (Task 13's preview window) that creates its own instance.
     pub fn loader(&self) -> LoadProc {
-        gl_load_proc
+        proc_loader()
     }
 
     /// Creates a libprojectM instance bound to this context.
