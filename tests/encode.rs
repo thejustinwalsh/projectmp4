@@ -445,3 +445,57 @@ fn a_staging_path_in_another_directory_is_rejected() {
         .into_owned();
     assert!(msg.contains(&part.display().to_string()) && msg.contains(&out.display().to_string()), "{msg}");
 }
+
+/// ffmpeg exiting 0 while frames are still coming (`-shortest` can do this) is a failed write,
+/// and a failed write must not publish: the previous render has to survive byte for byte.
+#[test]
+fn a_zero_exit_mid_stream_fails_the_write_without_publishing() {
+    let t = Tmp::new("encode");
+    let program = stub(&t.0, "s", "head -c 460800 >/dev/null\necho truncated > \"$OUT\"\nexit 0");
+    let out = t.0.join("o.mp4");
+    std::fs::write(&out, b"previous render").unwrap();
+    let mut e = Encoder::start_with_program(&program, &out, Path::new(AUDIO), 320, 180, 30, false).unwrap();
+    let mut failure = None;
+    for _ in 0..50 {
+        if let Err(err) = e.write_frame(&grey_frame(320, 180)) {
+            failure = Some(err.0.into_owned());
+            break;
+        }
+    }
+    let msg = failure.expect("a write to an exited ffmpeg must fail");
+    assert!(msg.contains("writing frame"), "{msg}");
+    assert_eq!(std::fs::read(&out).unwrap(), b"previous render", "a failed write published the truncated part");
+    assert!(parts(&out).is_empty(), ".part left behind");
+    drop(e);
+    assert_eq!(std::fs::read(&out).unwrap(), b"previous render");
+}
+
+/// A run killed outright leaves its `<out>.part.<pid>.*` behind; the next run for the same
+/// output clears those whose pid is dead, and nothing else.
+#[test]
+fn a_new_run_sweeps_staging_files_orphaned_by_dead_processes() {
+    let t = Tmp::new("encode");
+    let out = t.0.join("o.mp4");
+    // A pid that provably belonged to a process that has exited.
+    let mut child = Command::new("true").spawn().unwrap();
+    let dead = child.id();
+    child.wait().unwrap();
+    let live = std::process::id();
+    let mk = |name: String| {
+        let p = t.0.join(name);
+        std::fs::write(&p, b"x").unwrap();
+        p
+    };
+    let orphan = mk(format!("o.mp4.part.{dead}.ThreadId(7).3"));
+    let alive = mk(format!("o.mp4.part.{live}.ThreadId(7).3"));
+    let other_output = mk(format!("other.mp4.part.{dead}.ThreadId(7).3"));
+    let unparseable = mk("o.mp4.part.stale".to_string());
+    let unrelated = mk("o.mp4.partial".to_string());
+    let ok = stub(&t.0, "ok", "cat >/dev/null\necho video > \"$OUT\"\nexit 0");
+    let e = Encoder::start_with_program(&ok, &out, Path::new(AUDIO), 16, 16, 30, false).unwrap();
+    assert!(!orphan.exists(), "dead process's staging file survived");
+    for keep in [&alive, &other_output, &unparseable, &unrelated] {
+        assert!(keep.exists(), "{} must not be swept", keep.display());
+    }
+    e.finish().unwrap();
+}

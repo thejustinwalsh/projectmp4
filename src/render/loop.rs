@@ -218,7 +218,7 @@ impl BlackWatch {
     }
 
     fn is_heard(&self, n: u64) -> bool {
-        self.last_heard.is_some_and(|l| n - l < self.hold)
+        self.last_heard.is_some_and(|l| n.saturating_sub(l) < self.hold)
     }
 
     /// One render of frame `n`. True when the run of black music reaches `fps`
@@ -309,6 +309,8 @@ fn run(args: &RenderArgs, prep: &Prepared) -> Result<RenderReport> {
     let (w, h) = (WIDTH as usize, HEIGHT as usize);
     let mut watch = BlackWatch::new(fps);
     let mut frames_written = 0u64;
+    // One frame buffer for the whole render; `glReadPixels` overwrites all of it.
+    let mut px = vec![0u8; w * h * 4];
     for n in 0..plan.total_frames {
         while next_switch < switch_at.len() && switch_at[next_switch] <= n {
             let cut = plan.switches[next_switch].cut;
@@ -326,14 +328,13 @@ fn run(args: &RenderArgs, prep: &Prepared) -> Result<RenderReport> {
         pm.pcm_add_float(window, Channels::Stereo);
         pm.set_frame_time(n as f64 / fps as f64);
 
-        let mut px = settle_frame(
+        settle_frame(
             &mut watch,
             n,
             || {
                 pm.render_frame_fbo(gl.fbo());
-                let px = gl.read_rgba()?;
-                let black = is_black(&px);
-                Ok((px, black))
+                gl.read_rgba_into(&mut px)?;
+                Ok(((), is_black(&px)))
             },
             || {
                 if list.replace_current(&pm, "rendered black for a second of music")? {
@@ -412,6 +413,19 @@ mod tests {
             }
         }
         None
+    }
+
+    /// `BlackWatch` is `pub` and nothing orders its calls: an earlier `n` than the last one
+    /// heard must read as "heard just now", not wrap into the far future.
+    #[test]
+    fn observing_a_frame_before_the_last_heard_one_does_not_wrap() {
+        let mut w = BlackWatch::new(FPS);
+        w.hear(100, &win(0.5));
+        let mut dead = false;
+        for _ in 0..FPS {
+            dead |= w.observe(50, true);
+        }
+        assert!(dead, "an out-of-order frame silently disabled dead-preset detection");
     }
 
     #[test]

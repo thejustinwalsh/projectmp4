@@ -485,9 +485,27 @@ impl GlContext {
     /// both are saved and restored so a preview context sharing this thread
     /// (Task 13) never inherits them.
     pub fn read_rgba(&self) -> Result<Vec<u8>> {
+        let mut buf = vec![0u8; self.frame_len()?];
+        self.read_rgba_into(&mut buf)?;
+        Ok(buf)
+    }
+
+    fn frame_len(&self) -> Result<usize> {
+        (self.width as usize)
+            .checked_mul(self.height as usize)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or_else(|| Error::msg(format!("frame size {}x{} overflows", self.width, self.height)))
+    }
+
+    /// [`read_rgba`](Self::read_rgba) into a caller-owned buffer of exactly
+    /// `width * height * 4` bytes, every one of which is overwritten. Lets a
+    /// frame loop reuse one buffer instead of zeroing 8 MB per frame.
+    pub fn read_rgba_into(&self, buf: &mut [u8]) -> Result<()> {
         self.ensure_current()?;
-        let len = self.width as usize * self.height as usize * 4;
-        let mut buf = vec![0u8; len];
+        let len = self.frame_len()?;
+        if buf.len() != len {
+            return Err(Error::msg(format!("read buffer is {} bytes, expected {len}", buf.len())));
+        }
         let mut prev_fb: gl::GLint = 0;
         let mut prev_align: gl::GLint = 4;
         unsafe {
@@ -509,7 +527,7 @@ impl GlContext {
             gl::bind_framebuffer(gl::READ_FRAMEBUFFER, prev_fb as gl::GLuint);
         }
         gl_check("glReadPixels from the offscreen framebuffer")?;
-        Ok(buf)
+        Ok(())
     }
 
     fn destroy(&mut self) {

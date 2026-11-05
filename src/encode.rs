@@ -37,6 +37,39 @@ fn part_path(out: &Path) -> PathBuf {
     out.with_file_name(name)
 }
 
+/// Remove `<out>.part.<pid>.*` files left beside `out` by runs that were killed
+/// (SIGKILL, power loss). Only a file whose pid is not a live process is
+/// removed, so a concurrent render's staging file is never touched.
+fn sweep_orphaned_parts(out: &Path) {
+    let Some(name) = out.file_name().and_then(|n| n.to_str()) else { return };
+    let prefix = format!("{name}.part.");
+    let dir = match out.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let file = e.file_name();
+        let Some(rest) = file.to_str().and_then(|f| f.strip_prefix(&prefix)) else { continue };
+        let Some(pid) = rest.split('.').next().and_then(|p| p.parse::<u32>().ok()) else { continue };
+        if e.file_type().is_ok_and(|t| t.is_file()) && !pid_alive(pid) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// `ps -p` succeeds for any existing process regardless of owner; if `ps`
+/// cannot run, assume alive so the sweep errs toward keeping data.
+fn pid_alive(pid: u32) -> bool {
+    Command::new("ps")
+        .args(["-p", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(true)
+}
+
 /// The ffmpeg argument vector (without the program name).
 pub fn ffmpeg_args(out: &Path, audio: &Path, w: u32, h: u32, fps: u32, fast: bool) -> Vec<OsString> {
     let mut a: Vec<OsString> = Vec::new();
@@ -94,6 +127,7 @@ impl Encoder {
         fps: u32,
         fast: bool,
     ) -> Result<Encoder> {
+        sweep_orphaned_parts(out);
         Self::start_staged(program, out, &part_path(out), audio, w, h, fps, fast)
     }
 
@@ -185,25 +219,27 @@ impl Encoder {
         match res {
             Ok(()) => Ok(()),
             Err(e) => {
-                // ffmpeg went away; its exit status and stderr say why.
-                let why = self.reap().err().map_or_else(String::new, |e| format!(": {}", e.0));
+                // ffmpeg went away; its exit status and stderr say why. Diagnosis
+                // never publishes: whatever it left in the `.part` is truncated.
+                let why = match self.wait_child() {
+                    Ok((status, tail)) => {
+                        let _ = std::fs::remove_file(&self.part);
+                        if status.success() {
+                            ": ffmpeg exited 0 before all frames were written".to_string()
+                        } else {
+                            format!(": {}", self.exit_error(status, &tail).0)
+                        }
+                    }
+                    Err(e) => format!(": {}", e.0),
+                };
                 Err(Error::msg(format!("writing frame to ffmpeg failed ({e}){why}")))
             }
         }
     }
 
+    /// The only place the output is published.
     pub fn finish(mut self) -> Result<()> {
-        self.reap()
-    }
-
-    /// Close stdin, wait for ffmpeg, join the stderr drain; Err on non-zero exit.
-    fn reap(&mut self) -> Result<()> {
-        drop(self.stdin.take());
-        let Some(mut child) = self.child.take() else {
-            return Err(Error::msg("encoder already closed"));
-        };
-        let status = child.wait().map_err(|e| Error::msg(format!("waiting for ffmpeg: {e}")))?;
-        let tail = self.stderr.take().and_then(|t| t.join().ok()).unwrap_or_default();
+        let (status, tail) = self.wait_child()?;
         if status.success() {
             // Exit 0 is not proof of a video (ffmpeg exits 0 after failing to
             // open an existing output). The `.part` is always created fresh,
@@ -221,11 +257,26 @@ impl Encoder {
             return verdict;
         }
         let _ = std::fs::remove_file(&self.part);
-        Err(Error::msg(format!(
+        Err(self.exit_error(status, &tail))
+    }
+
+    /// Close stdin, wait for ffmpeg, join the stderr drain. Touches no files.
+    fn wait_child(&mut self) -> Result<(std::process::ExitStatus, Vec<u8>)> {
+        drop(self.stdin.take());
+        let Some(mut child) = self.child.take() else {
+            return Err(Error::msg("encoder already closed"));
+        };
+        let status = child.wait().map_err(|e| Error::msg(format!("waiting for ffmpeg: {e}")))?;
+        let tail = self.stderr.take().and_then(|t| t.join().ok()).unwrap_or_default();
+        Ok((status, tail))
+    }
+
+    fn exit_error(&self, status: std::process::ExitStatus, tail: &[u8]) -> Error {
+        Error::msg(format!(
             "ffmpeg writing {} exited with {status}: {}",
             self.out.display(),
-            String::from_utf8_lossy(&tail).trim()
-        )))
+            String::from_utf8_lossy(tail).trim()
+        ))
     }
 }
 

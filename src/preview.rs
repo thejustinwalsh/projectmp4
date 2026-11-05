@@ -676,8 +676,11 @@ pub fn preview(args: &RenderArgs) -> Result<()> {
         .map_err(|e| Error::msg(format!("create window: {e}")))?;
     let gl = gl_for(&window)?;
     let pm = Instance::new(&gl, proc_loader())?;
+    // A window whose size is not yet known can report 0x0 (as `gl_for` and the
+    // `Resized` handler also guard against).
     let size = window.inner_size();
-    pm.set_window_size(size.width, size.height);
+    let (sw, sh) = (size.width.max(1), size.height.max(1));
+    pm.set_window_size(sw, sh);
     pm.set_mesh_size(64, 48);
     pm.set_fps(plan.fps as i32);
     if let Some(t) = &plan.textures {
@@ -686,7 +689,7 @@ pub fn preview(args: &RenderArgs) -> Result<()> {
 
     let state = PreviewState::from_plan(plan)?;
     let overlay = Overlay::new(&plan.title, plan.artist.as_deref(), plan.art.as_deref(), plan.watermark_style, !plan.static_overlay)?;
-    let gl_overlay = GlOverlay::new(&overlay, size.width, size.height)?;
+    let gl_overlay = GlOverlay::new(&overlay, sw, sh)?;
     let bass = bass_per_frame(&prep.driver, plan.fps, plan.total_frames);
     let first = Load { path: state.current().to_owned(), smooth: false };
     eprintln!(

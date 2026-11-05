@@ -29,6 +29,9 @@ unsafe extern "C" {
     fn glBindTexture(target: u32, id: u32);
     fn glGenTextures(n: i32, ids: *mut u32);
     fn glDeleteTextures(n: i32, ids: *const c_void);
+    fn glIsProgram(id: u32) -> u8;
+    fn glIsTexture(id: u32) -> u8;
+    fn glIsVertexArray(id: u32) -> u8;
 }
 
 const FRAMEBUFFER: u32 = 0x8D40;
@@ -168,4 +171,61 @@ fn the_gpu_overlay_matches_the_cpu_composite_over_a_gradient() {
     }
     gl.make_current().unwrap();
     gpu_overlay.delete();
+}
+
+/// `read_rgba_into` fills a caller's buffer, overwriting every byte of it, and refuses a
+/// buffer of the wrong size rather than reading into part of it.
+#[test]
+fn read_rgba_into_overwrites_a_reused_buffer_and_checks_its_length() {
+    let gl = GlContext::new(64, 48).unwrap();
+    unsafe {
+        glBindFramebuffer(FRAMEBUFFER, gl.fbo());
+        glClearColor(0.2, 0.4, 0.6, 1.0);
+        glClear(COLOR_BUFFER_BIT);
+    }
+    let want = gl.read_rgba().unwrap();
+    assert_eq!(want.len(), 64 * 48 * 4);
+    assert_eq!(&want[..4], &[51, 102, 153, 255]);
+    let mut buf = vec![0xABu8; want.len()];
+    gl.read_rgba_into(&mut buf).unwrap();
+    assert_eq!(buf, want, "stale bytes survived the read");
+    assert!(gl.read_rgba_into(&mut vec![0u8; want.len() - 1]).is_err());
+    assert!(gl.read_rgba_into(&mut vec![0u8; want.len() + 1]).is_err());
+}
+
+/// Names of the program, texture and vertex-array objects alive in the current context.
+fn live_objects() -> Vec<(&'static str, u32)> {
+    let mut v = Vec::new();
+    for id in 1..512u32 {
+        unsafe {
+            if glIsProgram(id) != 0 {
+                v.push(("program", id));
+            }
+            if glIsTexture(id) != 0 {
+                v.push(("texture", id));
+            }
+            if glIsVertexArray(id) != 0 {
+                v.push(("vertex array", id));
+            }
+        }
+    }
+    v
+}
+
+/// Dropping a `GlOverlay` (an early return, an unwind) frees its GL objects without an
+/// explicit `delete()`; and an explicit `delete()` followed by the drop is harmless.
+#[test]
+fn dropping_a_gl_overlay_frees_its_objects() {
+    let gl = GlContext::new(64, 48).unwrap();
+    let overlay = Overlay::new("Title", Some("Artist"), None, MarkStyle::Word, true).unwrap();
+    let before = live_objects();
+    let made = GlOverlay::new(&overlay, 640, 360).unwrap();
+    assert!(live_objects().len() > before.len(), "the overlay created nothing; the test proves nothing");
+    drop(made);
+    assert_eq!(live_objects(), before, "dropping the overlay leaked GL objects");
+    let mut twice = GlOverlay::new(&overlay, 640, 360).unwrap();
+    twice.delete();
+    drop(twice);
+    assert_eq!(live_objects(), before);
+    drop(gl);
 }

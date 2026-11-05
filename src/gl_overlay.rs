@@ -157,7 +157,14 @@ pub struct GlOverlay {
 impl GlOverlay {
     /// Uploads `overlay`'s tiles as laid out for a `w`*`h` frame.
     pub fn new(overlay: &Overlay, w: u32, h: u32) -> Result<GlOverlay> {
-        let (vs, fs) = (compile(gl::VERTEX_SHADER, VERTEX)?, compile(gl::FRAGMENT_SHADER, FRAGMENT)?);
+        let vs = compile(gl::VERTEX_SHADER, VERTEX)?;
+        let fs = match compile(gl::FRAGMENT_SHADER, FRAGMENT) {
+            Ok(fs) => fs,
+            Err(e) => {
+                unsafe { gl::delete_shader(vs) };
+                return Err(e);
+            }
+        };
         unsafe {
             let program = gl::create_program();
             gl::attach_shader(program, vs);
@@ -238,8 +245,13 @@ impl GlOverlay {
         }
     }
 
-    /// Frees the GL objects; the context must be current.
+    /// Frees the GL objects; the context must be current. Idempotent, and also
+    /// run by `Drop` (which cannot know the context is current, so call this
+    /// explicitly first wherever the ordering matters).
     pub fn delete(&mut self) {
+        if self.program == 0 {
+            return;
+        }
         unsafe {
             for t in self.block.iter().chain(&self.marks) {
                 gl::delete_textures(1, &t.id);
@@ -247,7 +259,15 @@ impl GlOverlay {
             gl::delete_vertex_arrays(1, &self.vao);
             gl::delete_program(self.program);
         }
+        self.program = 0;
+        self.vao = 0;
         self.block = None;
         self.marks.clear();
+    }
+}
+
+impl Drop for GlOverlay {
+    fn drop(&mut self) {
+        self.delete();
     }
 }
