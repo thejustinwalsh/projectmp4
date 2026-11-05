@@ -174,6 +174,22 @@ impl<'gl> Instance<'gl> {
         unsafe { sys::projectm_set_mesh_size(self.handle, width as usize, height as usize) };
     }
 
+    /// Directories projectM searches for the `sampler` textures presets name.
+    /// Must be set before the presets that need them are loaded.
+    pub fn set_texture_search_paths(&self, paths: &[&Path]) -> Result<()> {
+        let c: Vec<CString> = paths
+            .iter()
+            .map(|p| {
+                p.to_str()
+                    .and_then(|s| CString::new(s).ok())
+                    .ok_or_else(|| Error::msg(format!("texture path {} is not valid UTF-8 without NULs", p.display())))
+            })
+            .collect::<Result<_>>()?;
+        let ptrs: Vec<*const c_char> = c.iter().map(|s| s.as_ptr()).collect();
+        unsafe { sys::projectm_set_texture_search_paths(self.handle, ptrs.as_ptr() as *mut *const c_char, ptrs.len()) };
+        Ok(())
+    }
+
     /// Nominal frame rate. Presets read it, and it seeds projectM's timers.
     pub fn set_fps(&self, fps: i32) {
         unsafe { sys::projectm_set_fps(self.handle, fps) };

@@ -22,7 +22,7 @@ pub struct SwitchPoint {
 /// One-pole low-pass corner of the "low band".
 const LOW_BAND_HZ: f64 = 200.0;
 /// Envelope hop, in frames (about 21 ms at 48 kHz).
-const HOP: usize = 1024;
+pub const HOP: usize = 1024;
 /// Seconds of envelope averaged on each side of a downbeat to measure its step.
 const STEP_WINDOW_S: f64 = 1.0;
 /// A downbeat is a drop when its rise in low-band energy exceeds this many
@@ -30,7 +30,7 @@ const STEP_WINDOW_S: f64 = 1.0;
 pub const DROP_FACTOR: f64 = 4.0;
 
 /// Mean-square energy of the sub-200 Hz mono signal, one value per `HOP` frames.
-fn low_band_envelope(d: &Driver) -> Vec<f64> {
+pub fn low_band_envelope(d: &Driver) -> Vec<f64> {
     let s = d.samples();
     let a = 1.0 - (-2.0 * std::f64::consts::PI * LOW_BAND_HZ / d.rate as f64).exp();
     let mut y = 0.0f64;

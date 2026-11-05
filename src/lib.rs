@@ -5,3 +5,4 @@ pub mod presets;
 pub use presets::Packs;
 pub mod render;
 pub mod encode;
+pub mod cli;
