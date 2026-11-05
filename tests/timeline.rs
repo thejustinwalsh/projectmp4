@@ -206,7 +206,7 @@ fn a_ninety_second_quiet_intro_keeps_switching_and_says_so() {
     let still = longest_still(&sw, a.duration);
     assert!(still <= 16.0 + 1e-9, "{still} s on one preset: {sw:?}");
     let notice = fill.notice(a.duration, 8.0).expect("a grid in place of the music must be reported");
-    assert!(notice.contains("90 s") && notice.contains("150 s") && notice.contains("grid"), "{notice}");
+    assert!(notice.contains("90 s") && notice.contains("150 s") && notice.contains("fixed 8 s interval"), "{notice}");
 }
 
 #[test]
@@ -318,4 +318,38 @@ fn a_downbeat_too_near_the_start_does_not_calibrate_the_drop_threshold() {
     let sw = plan_switches(&a, &d, 8.0, 4.0);
     let got: Vec<(f64, Cut)> = sw.iter().map(|s| (s.t, s.cut)).collect();
     assert_eq!(got, [(12.0, Cut::Soft), (24.0, Cut::Hard), (36.0, Cut::Soft)], "{sw:?}");
+}
+
+// --- the grid notice must be worth reading ---------------------------------------------
+
+fn notice_for(last_downbeat: f64) -> Option<String> {
+    let d = ambient_intro(); // 150 s: the 20% line is 30 s of grid
+    let a = analysis((1..).map(|k| 2.0 * k as f64).take_while(|t| *t <= last_downbeat).collect(), d);
+    plan_switches_reporting(&a, d, 8.0, 4.0).1.notice(a.duration, 8.0)
+}
+
+#[test]
+fn an_ordinary_outro_prints_nothing() {
+    // Grid covers the 28 s after the last bar line: under 20% of 150 s, under 60 s.
+    assert_eq!(notice_for(122.0), None);
+    // And a typical short outro.
+    assert_eq!(notice_for(140.0), None);
+}
+
+#[test]
+fn a_long_stretch_on_the_grid_prints_how_much() {
+    // 32 s of 150 s is over 20% (30 s).
+    let n = notice_for(118.0).expect("over 20% of the track on the grid must be reported");
+    assert!(n.contains("32 s of this 150 s track") && n.contains("fixed 8 s interval"), "{n}");
+    // The 60 s line, on a track long enough that 20% is further away: 59 s is silent, 60 s speaks.
+    let g = |secs| projectmp4::audio::timeline::GridFill { added: 7, secs };
+    assert_eq!(g(59.0).notice(600.0, 8.0), None);
+    assert!(g(60.0).notice(600.0, 8.0).is_some());
+    // 20% line exactly, short track.
+    assert_eq!(g(29.9).notice(150.0, 8.0), None);
+    assert!(g(30.0).notice(150.0, 8.0).is_some());
+    // No downbeats at all is 100%.
+    let d = ambient_intro();
+    let (_, fill) = plan_switches_reporting(&analysis(vec![], d), d, 8.0, 4.0);
+    assert!(fill.notice(150.0, 8.0).is_some());
 }

@@ -95,13 +95,21 @@ pub struct GridFill {
     pub secs: f64,
 }
 
+/// The grid is worth mentioning once it carried this share of the track...
+const NOTICE_FRACTION: f64 = 0.20;
+/// ...or this many seconds, whichever is reached first. An outro or a short
+/// breakdown is ordinary music; a line that fires on those gets skipped, and
+/// then it is skipped on the 90 s intro it exists for.
+const NOTICE_SECS: f64 = 60.0;
+
 impl GridFill {
-    /// What to tell the user, or `None` when the music supplied every switch point.
+    /// What to tell the user, or `None` when the grid covered too little to matter.
     pub fn notice(&self, duration: f64, grid: f64) -> Option<String> {
-        (self.added > 0).then(|| {
+        let enough = self.secs >= NOTICE_SECS || self.secs >= NOTICE_FRACTION * duration;
+        (self.added > 0 && enough).then(|| {
             format!(
-                "the beat analysis left {:.0} s of this {duration:.0} s track without downbeats; \
-                 switching presets on a fixed {grid} s grid there",
+                "{:.0} s of this {duration:.0} s track ran on a fixed {grid} s interval instead of following the music: \
+                 the analysis found no downbeats there (common in ambient intros, long breakdowns and outros)",
                 self.secs
             )
         })
