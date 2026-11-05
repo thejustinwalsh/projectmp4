@@ -438,6 +438,27 @@ mod tests {
     }
 
     #[test]
+    fn bass_per_frame_releases_in_seconds_at_the_frame_rate_it_is_given() {
+        // 1 s of loud 100 Hz then 1 s of silence, through the real envelope. The last
+        // loud frame is index fps-1; half a second later the level has fallen by
+        // 0.9^30 (0.042) at any fps. A caller that passed a fixed 60 to the smoother
+        // would leave 0.59 at 10 fps.
+        let rate = 48_000usize;
+        let mut pcm = Vec::with_capacity(rate * 4);
+        for i in 0..rate * 2 {
+            let v = if i < rate { 0.8 * (std::f32::consts::TAU * 100.0 * i as f32 / rate as f32).sin() } else { 0.0 };
+            pcm.extend_from_slice(&[v, v]);
+        }
+        let d = Driver::new(crate::audio::DriverKind::Mix, pcm);
+        for fps in [10u32, 60, 240] {
+            let out = bass_per_frame(&d, fps, 2 * fps as u64);
+            assert!(out[fps as usize / 2] > 0.9, "{fps} fps: not at full level during the burst: {}", out[fps as usize / 2]);
+            let got = out[(fps - 1 + fps / 2) as usize];
+            assert!((0.035..0.055).contains(&got), "{fps} fps: level half a second after the burst is {got}");
+        }
+    }
+
+    #[test]
     fn one_frame_per_second_cannot_hang_the_frame_loop() {
         // At 1 fps a single black frame is a "full second": the watch says dead on
         // every black frame, even straight after a replacement. The loop must still

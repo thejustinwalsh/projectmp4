@@ -813,3 +813,28 @@ fn help_warns_that_preset_motion_depends_on_the_frame_rate() {
     let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(help.contains("once per frame") && help.contains("slower at 10 fps") && help.contains("faster at 240"), "{help}");
 }
+
+#[test]
+fn a_vbr_mp3_whose_container_duration_is_wrong_is_still_beat_analysed() {
+    // A VBR MP3 without a Xing/Info header has only an estimated container
+    // duration (here 18.4 s for 20.04 s of audio). The analyser runs on the decoded
+    // audio, so judging it against the container's figure would distrust a good
+    // analysis and fall back to the grid, blaming the analyser.
+    let tmp = Tmp::new();
+    let mp3 = tmp.0.join("vbr.mp3");
+    let o = Command::new("ffmpeg")
+        .args(["-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i", "sine=f=60:d=3,volume=0.8", "-f", "lavfi", "-i", "anoisesrc=d=20:a=0.3"])
+        .args(["-filter_complex", "[1:a]volume='if(lt(mod(t,0.5),0.1),1,0.02)':eval=frame[n];[n][0:a]amix=inputs=2:duration=longest"])
+        .args(["-c:a", "libmp3lame", "-q:a", "9", "-write_xing", "0"])
+        .arg(&mp3)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    // The precondition that makes this test meaningful: the two durations disagree by over a second.
+    let container = input_duration(mp3.to_str().unwrap());
+    let decoded = expected_frames(mp3.to_str().unwrap()) as f64 / FPS as f64;
+    assert!((container - decoded).abs() > 1.0, "container {container} s vs decoded {decoded} s no longer differ");
+    let p = render_plan(&RenderArgs::new(&mp3)).unwrap();
+    assert!(p.bpm > 0.0, "the beat analysis was thrown away (bpm {})", p.bpm);
+    assert!(!p.switches.is_empty());
+}

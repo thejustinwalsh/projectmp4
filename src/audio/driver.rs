@@ -40,7 +40,7 @@ fn default_cache_dir() -> Option<PathBuf> {
 }
 
 impl Driver {
-    fn new(kind: DriverKind, mut pcm: Vec<f32>) -> Driver {
+    pub(crate) fn new(kind: DriverKind, mut pcm: Vec<f32>) -> Driver {
         let frames = pcm.len() / 2;
         pcm.truncate(frames * 2);
         pcm.resize(frames * 2 + MAX_WINDOW_FRAMES * 2, 0.0);

@@ -41,7 +41,7 @@ pub enum Outcome {
 }
 
 pub fn analyse(src: &Source, models: &Path) -> Result<Analysis> {
-    match analyse_outcome(src, models)? {
+    match analyse_outcome(src, models, None)? {
         Outcome::Beats(a) => Ok(a),
         Outcome::NoBeats(why) => Err(Error::msg(format!("beat analysis: {why}"))),
     }
@@ -49,11 +49,16 @@ pub fn analyse(src: &Source, models: &Path) -> Result<Analysis> {
 
 /// Like [`analyse`], but a beatless track is `Ok(NoBeats)` while missing or
 /// broken models, a failing analyser, or unusable output stay errors.
-pub fn analyse_outcome(src: &Source, models: &Path) -> Result<Outcome> {
+///
+/// `track_secs` is the length of the audio the analyser was run on (the
+/// normalised WAV, i.e. the *decoded* length: a container's own duration can be
+/// an estimate that is off by seconds on VBR MP3s). An analyser reporting a
+/// different length has analysed the wrong span and is not trusted.
+pub fn analyse_outcome(src: &Source, models: &Path, track_secs: Option<f64>) -> Result<Outcome> {
     let cached = default_cache_dir().and_then(|d| read_cache(&cache_path(&d, src)));
     match cached {
         Some(a) => Ok(Outcome::Beats(a)),
-        None => compute(src, models),
+        None => compute(src, models, track_secs),
     }
 }
 
@@ -67,7 +72,7 @@ pub fn analyse_with_cache_dir(src: &Source, models: &Path, cache_dir: &Path) -> 
     if let Some(a) = read_cache(&cache_path(cache_dir, src)) {
         return Ok(a);
     }
-    match compute(src, models)? {
+    match compute(src, models, None)? {
         Outcome::Beats(a) => Ok(a),
         Outcome::NoBeats(why) => Err(Error::msg(format!("beat analysis: {why}"))),
     }
@@ -83,7 +88,7 @@ fn read_cache(path: &Path) -> Option<Analysis> {
     Some(a)
 }
 
-fn compute(src: &Source, models: &Path) -> Result<Outcome> {
+fn compute(src: &Source, models: &Path, track_secs: Option<f64>) -> Result<Outcome> {
     let v = deck_track_analysis::analyze(models, &src.wav).map_err(|e| {
         Error::msg(format!(
             "beat analysis could not run on {}: {e}. The analysis models are expected in {}; \
@@ -92,7 +97,7 @@ fn compute(src: &Source, models: &Path) -> Result<Outcome> {
             models.display()
         ))
     })?;
-    match interpret(&v, Some(src.duration)) {
+    match interpret(&v, track_secs) {
         Interpreted::Usable(a, notes) => {
             for n in notes {
                 eprintln!("render: beat analysis: {n}");
@@ -382,9 +387,18 @@ mod tests {
         let (a, notes) = usable(&v);
         assert_eq!(a.beats, vec![0.5, 1.0, 1.5]);
         let all = notes.join(" | ");
-        for needle in ["beats: 1 entries were not numbers", "beats: 1 timestamps outside", "beats: out of order, sorted", "beats: 1 duplicate", "downbeats: 1 timestamps outside"] {
-            assert!(all.contains(needle), "missing {needle:?} in {all}");
+        // Anchored: "beats" is a substring of "downbeats", so a bare `contains`
+        // for a beats note would be satisfied by the downbeats one.
+        for prefix in [
+            "beats: 1 entries were not numbers",
+            "beats: 1 timestamps outside",
+            "beats: out of order, sorted",
+            "beats: 1 duplicate",
+            "downbeats: 1 timestamps outside",
+        ] {
+            assert!(notes.iter().any(|n| n.starts_with(prefix)), "no note starting {prefix:?} in {all}");
         }
+        assert_eq!(notes.iter().filter(|n| n.starts_with("downbeats:")).count(), 1, "{all}");
     }
 
     #[test]
@@ -396,5 +410,11 @@ mod tests {
         // Within a second is the container-vs-decoded difference and is fine.
         assert!(matches!(interpret(&v, Some(30.9)), Interpreted::Usable(..)));
         assert!(matches!(interpret(&v, Some(31.1)), Interpreted::Beatless(_)));
+        // And an analyser that measured LONGER than the track, by the same rule.
+        let long = json!({"bpm": 120.0, "beats": [1.0, 2.0, 3.0], "downbeats": [1.0], "duration": 300.0});
+        let w = why(&long, Some(240.0));
+        assert!(w.contains("300.0 s") && w.contains("240.0 s") && w.contains("wrong span"), "{w}");
+        assert!(matches!(interpret(&v, Some(29.1)), Interpreted::Usable(..)));
+        assert!(matches!(interpret(&v, Some(28.9)), Interpreted::Beatless(_)));
     }
 }

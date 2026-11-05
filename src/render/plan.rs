@@ -264,7 +264,7 @@ pub(crate) fn prepare(args: &RenderArgs) -> Result<Prepared> {
     // That applies only to an analyser that ran and found no beats. One that
     // could not run (missing or broken models) is an error the user can fix:
     // falling back would hide it for good.
-    let analysis = match analyse_outcome(&src, &args.models)? {
+    let analysis = match analyse_outcome(&src, &args.models, Some(wav_secs))? {
         Outcome::Beats(a) => a,
         Outcome::NoBeats(why) => {
             eprintln!("render: {why}; switching presets on a fixed {MIN_GAP} s grid");
