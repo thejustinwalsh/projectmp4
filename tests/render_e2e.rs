@@ -565,13 +565,19 @@ fn preset_switches_land_on_their_planned_frames() {
     // through near-black (measured: (0,0,15)), so brightness is not bounded.
     // Measured counts over 9 draws: 7 to 33 per switch; the bound is 4.
     // A switch handed to projectM without `smooth` would give none.
-    for &sf in &want_frames[..3] {
+    for (&sf, new_colour) in want_frames[..3].iter().zip(["blue", "red", "blue"]) {
         let at: Vec<u64> = (0..200).map(|k| sf + k).collect();
+        // The window ends on the pure new colour: the blend completed.
+        assert_eq!(colours_at(&r.out, &[sf + 199]), [new_colour], "blend after frame {sf} did not finish");
         let blended: Vec<[u32; 3]> = rgb_at(&r.out, &at)
             .into_iter()
             .filter(|&[r, g, b]| !(r > 200 && g < 60 && b < 60) && !(b > 200 && r < 60 && g < 60))
             .collect();
         println!("blended frames after {sf}: {}", blended.len());
+        // A fade has many different colours; a black flash has one (or two).
+        let distinct: std::collections::HashSet<_> = blended.iter().collect();
+        println!("after {sf}: {} blended, {} distinct", blended.len(), distinct.len());
+        assert!(distinct.len() >= 4, "{} distinct colours in {} blended frames after frame {sf}", distinct.len(), blended.len());
         assert!(blended.len() >= 4, "only {} blended frames after the Soft switch at frame {sf}", blended.len());
         for [r, g, b] in &blended {
             assert!(*g < 80, "blended frame ({r},{g},{b}) is not red/blue, after frame {sf}");
@@ -710,8 +716,12 @@ fn broken_analysis_models_are_an_error_not_a_fallback() {
     let mut a = RenderArgs::new(kicks_wav(&tmp));
     a.models = tmp.0.join("no-such-models");
     let e = render_plan(&a).expect_err("a missing models directory must not fall back").to_string();
-    assert!(e.contains("models"), "{e}");
+    // Phrases only this failure produces: not the fixture's own path, and not
+    // what a beatless track says.
+    assert!(e.contains("beat analysis could not run"), "{e}");
+    assert!(e.contains("models are expected in"), "{e}");
     assert!(e.contains("no-such-models"), "the error should name the directory: {e}");
+    assert!(!e.contains("no beats"), "{e}");
 }
 
 #[test]
@@ -766,4 +776,32 @@ fn a_valid_limit_seconds_renders_that_much_through_the_cli() {
     // 2 s at 60 fps is 120 frames; `-shortest` may trim one.
     assert!(p.video_frames == 120 || p.video_frames == 119, "{} frames", p.video_frames);
     assert!((p.video_duration - 2.0).abs() < 0.05, "{} s", p.video_duration);
+}
+
+#[test]
+fn an_unusable_frame_rate_is_rejected_not_looped_on() {
+    let tmp = Tmp::new();
+    let input = abs_sample("three-note-signature.m4a");
+    for bad in ["0", "1", "9", "241", "1000", "abc"] {
+        let o = Command::new(env!("CARGO_BIN_EXE_projectmp4"))
+            .current_dir(&tmp.0)
+            .arg("render")
+            .arg(&input)
+            .arg(format!("--fps={bad}"))
+            .output()
+            .unwrap();
+        assert!(!o.status.success(), "--fps={bad} was accepted");
+        // Refused by the argument parser itself (clap's wording), before anything runs.
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(err.contains("--fps") && (err.contains("not in 10..=240") || err.contains("invalid digit")), "{bad}: {err}");
+    }
+    assert_eq!(std::fs::read_dir(&tmp.0).unwrap().count(), 0);
+    for bad in [0u32, 1, 9, 241] {
+        let mut a = RenderArgs::new(SIGNATURE);
+        a.fps = bad;
+        assert!(render_plan(&a).is_err(), "fps {bad}");
+    }
+    let mut a = RenderArgs::new(SIGNATURE);
+    a.fps = 10;
+    assert_eq!(render_plan(&a).unwrap().fps, 10);
 }

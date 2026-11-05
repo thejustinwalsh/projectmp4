@@ -19,6 +19,10 @@ pub const DEFAULT_PROFILE: &str = "deathstep";
 /// Seconds between ordinary preset changes, and between a drop's hard cuts.
 pub const MIN_GAP: f64 = 8.0;
 pub const DROP_GAP: f64 = 4.0;
+/// Frame rates accepted. Below 10 the half-second silence hold and the
+/// one-second dead-preset rule degenerate to a frame or two.
+pub const MIN_FPS: u32 = 10;
+pub const MAX_FPS: u32 = 240;
 
 const PROFILES_TOML: &str = include_str!("../../presets/profiles.toml");
 
@@ -246,8 +250,8 @@ pub fn render_plan(args: &RenderArgs) -> Result<RenderPlan> {
 }
 
 pub(crate) fn prepare(args: &RenderArgs) -> Result<Prepared> {
-    if args.fps == 0 || args.fps > 240 {
-        return Err(Error::msg(format!("--fps {} is out of range 1..=240", args.fps)));
+    if !(MIN_FPS..=MAX_FPS).contains(&args.fps) {
+        return Err(Error::msg(format!("--fps {} is out of range {MIN_FPS}..={MAX_FPS}", args.fps)));
     }
     if let Some(l) = args.limit_seconds {
         check_limit(l)?;
@@ -262,8 +266,8 @@ pub(crate) fn prepare(args: &RenderArgs) -> Result<Prepared> {
     // falling back would hide it for good.
     let analysis = match analyse_outcome(&src, &args.models)? {
         Outcome::Beats(a) => a,
-        Outcome::NoBeats => {
-            eprintln!("render: the track has no detectable beats; switching presets on a fixed {MIN_GAP} s grid");
+        Outcome::NoBeats(why) => {
+            eprintln!("render: {why}; switching presets on a fixed {MIN_GAP} s grid");
             fixed_grid(wav_secs)
         }
     };

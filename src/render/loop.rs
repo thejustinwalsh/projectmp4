@@ -228,6 +228,25 @@ impl BlackWatch {
     }
 }
 
+/// Renders frame `n` and, if its preset has just been judged dead, replaces it
+/// and renders once more. At most one replacement per frame, at any fps: the
+/// second picture is accepted whatever it is, so this cannot loop.
+fn settle_frame<P>(
+    watch: &mut BlackWatch,
+    n: u64,
+    mut render: impl FnMut() -> Result<(P, bool)>,
+    mut replace: impl FnMut() -> Result<()>,
+) -> Result<P> {
+    let (px, black) = render()?;
+    if !watch.observe(n, black) {
+        return Ok(px);
+    }
+    replace()?;
+    let (px, black) = render()?;
+    watch.observe(n, black);
+    Ok(px)
+}
+
 /// First frame at or after each switch time.
 pub fn switch_frames(plan: &RenderPlan) -> Vec<u64> {
     plan.switches.iter().map(|s| (s.t * plan.fps as f64 - 1e-9).ceil().max(0.0) as u64).collect()
@@ -292,17 +311,22 @@ fn run(args: &RenderArgs, prep: &Prepared) -> Result<RenderReport> {
         pm.pcm_add_float(window, Channels::Stereo);
         pm.set_frame_time(n as f64 / fps as f64);
 
-        let mut px;
-        loop {
-            pm.render_frame_fbo(gl.fbo());
-            px = gl.read_rgba()?;
-            if !watch.observe(n, is_black(&px)) {
-                break;
-            }
-            if list.replace_current(&pm, "rendered black for a second of music")? {
-                loads.push(LoadEvent { frame: n, preset: list.played.last().cloned().unwrap_or_default(), cut: None, smooth: list.last_smooth });
-            }
-        }
+        let mut px = settle_frame(
+            &mut watch,
+            n,
+            || {
+                pm.render_frame_fbo(gl.fbo());
+                let px = gl.read_rgba()?;
+                let black = is_black(&px);
+                Ok((px, black))
+            },
+            || {
+                if list.replace_current(&pm, "rendered black for a second of music")? {
+                    loads.push(LoadEvent { frame: n, preset: list.played.last().cloned().unwrap_or_default(), cut: None, smooth: list.last_smooth });
+                }
+                Ok(())
+            },
+        )?;
 
         flip_rows(&mut px, w, h);
         overlay.draw(&mut px, WIDTH, HEIGHT, bass[n as usize]);
@@ -380,6 +404,33 @@ mod tests {
         let mut w = BlackWatch::new(FPS);
         assert_eq!(dead_at(&mut w, std::iter::repeat(0.5).take(6000)), Some(59), "the 60th black frame, not the 59th or 61st");
         assert_eq!(w.max_run, 60);
+    }
+
+    #[test]
+    fn one_frame_per_second_cannot_hang_the_frame_loop() {
+        // At 1 fps a single black frame is a "full second": the watch says dead on
+        // every black frame, even straight after a replacement. The loop must still
+        // make one replacement and move on.
+        let mut w = BlackWatch::new(1);
+        w.hear(0, &win(0.5));
+        let (mut renders, mut replacements) = (0, 0);
+        let px = settle_frame(
+            &mut w,
+            0,
+            || {
+                renders += 1;
+                Ok((renders, true))
+            },
+            || {
+                replacements += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!((renders, replacements, px), (2, 1, 2));
+        // And the watch itself: every black audible frame is dead at 1 fps.
+        let mut w = BlackWatch::new(1);
+        assert_eq!(dead_at(&mut w, std::iter::repeat(0.5).take(3)), Some(0));
     }
 
     #[test]

@@ -51,7 +51,7 @@ struct RenderCmd {
     /// Use this .milk file instead of the profile's list; repeatable.
     #[arg(long)]
     preset: Vec<PathBuf>,
-    #[arg(long, default_value_t = 60)]
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(10..=240))]
     fps: u32,
     /// Audio that drives the visuals: stems (falls back to mix) or mix.
     #[arg(long, value_parser = parse_driver)]
