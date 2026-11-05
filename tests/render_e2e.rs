@@ -437,6 +437,9 @@ fn running_out_of_presets_does_not_abort_the_render() {
         assert!(r.skipped.iter().any(|s| &s.preset == p), "{p:?} never skipped: {:?}", r.skipped);
     }
     assert!(r.loads.len() >= 4, "{:?}", r.loads);
+    // At most one verdict per second of music (the run restarts after each): 6 s
+    // gives at most 7 skips. Reloading every frame would give hundreds.
+    assert!((2..=7).contains(&r.skipped.len()), "{} skips", r.skipped.len());
     assert_frames(&r, wav.to_str().unwrap());
     // A complete, playable file: the audio is there too (probe panics without it).
     assert!((probe(&r.out).audio_duration - 6.0).abs() < 0.05);
@@ -555,14 +558,24 @@ fn preset_switches_land_on_their_planned_frames() {
 
     // A Soft cut blends for about three seconds, through a transition effect
     // projectM picks at random each time, so the blend's exact colours are not
-    // reproducible; that there IS a blend is. Sampling every 2nd frame of the 200
-    // after each Soft switch, some are neither red nor blue (at stride 5 one run
-    // saw as few as 2, so the bound is only that there is at least one). A switch handed
-    // to projectM without `smooth` would jump straight to the new colour.
+    // reproducible; that there IS a blend, of these two colours, is. Every frame
+    // of the 200 after each Soft switch is sampled. Blended frames are those
+    // that are neither pure red nor pure blue; each must still be of the two
+    // (no green), so a different preset does not count. The effect may fade
+    // through near-black (measured: (0,0,15)), so brightness is not bounded.
+    // Measured counts over 9 draws: 7 to 33 per switch; the bound is 4.
+    // A switch handed to projectM without `smooth` would give none.
     for &sf in &want_frames[..3] {
-        let at: Vec<u64> = (0..100).map(|k| sf + 2 * k).collect();
-        let blended = colours_at(&r.out, &at).iter().filter(|&&c| c == "other").count();
-        assert!(blended >= 1, "only {blended} blended samples after the Soft switch at frame {sf}");
+        let at: Vec<u64> = (0..200).map(|k| sf + k).collect();
+        let blended: Vec<[u32; 3]> = rgb_at(&r.out, &at)
+            .into_iter()
+            .filter(|&[r, g, b]| !(r > 200 && g < 60 && b < 60) && !(b > 200 && r < 60 && g < 60))
+            .collect();
+        println!("blended frames after {sf}: {}", blended.len());
+        assert!(blended.len() >= 4, "only {} blended frames after the Soft switch at frame {sf}", blended.len());
+        for [r, g, b] in &blended {
+            assert!(*g < 80, "blended frame ({r},{g},{b}) is not red/blue, after frame {sf}");
+        }
     }
     // A Hard cut is instant and complete: every sampled frame for 60 frames is
     // fully the new colour. A smooth flag on it would show a blend.
@@ -680,4 +693,77 @@ fn limit_seconds_rejects_nonsense_and_a_limited_plan_describes_itself() {
     let full = render_plan(&a).unwrap();
     assert_eq!(full.total_frames, expected_frames(SIGNATURE));
     assert_eq!(full.switches.len(), 1);
+}
+
+/// A 6 s kick track under a fresh name, so the analysis cache cannot answer for it.
+fn kicks_wav(tmp: &Tmp) -> PathBuf {
+    let wav = tmp.0.join("kicks.wav");
+    write_synth_wav(&wav, &[(6.0, Tone::Kicks)]);
+    wav
+}
+
+#[test]
+fn broken_analysis_models_are_an_error_not_a_fallback() {
+    // The analyser could not run at all. Falling back to a grid would hide a
+    // setup problem the user can fix, for every video, forever.
+    let tmp = Tmp::new();
+    let mut a = RenderArgs::new(kicks_wav(&tmp));
+    a.models = tmp.0.join("no-such-models");
+    let e = render_plan(&a).expect_err("a missing models directory must not fall back").to_string();
+    assert!(e.contains("models"), "{e}");
+    assert!(e.contains("no-such-models"), "the error should name the directory: {e}");
+}
+
+#[test]
+fn a_beatless_track_plans_on_a_fixed_grid_when_the_analyser_works() {
+    // The same working analyser, a track it finds no beats in: a fixed 8 s grid,
+    // marked by bpm 0. The full render of this case is the ambient test.
+    let tmp = Tmp::new();
+    let wav = tmp.0.join("pad.wav");
+    write_synth_wav(&wav, &[(20.0, Tone::Pad(0.0056))]);
+    let p = render_plan(&RenderArgs::new(&wav)).expect("a beatless track must not abort");
+    assert_eq!(p.bpm, 0.0);
+    assert_eq!(p.switches.iter().map(|s| s.t).collect::<Vec<_>>(), [8.0, 16.0]);
+    // ...and the analyser really is working on beaty material in the same setup.
+    let k = render_plan(&RenderArgs::new(kicks_wav(&tmp))).unwrap();
+    assert!(k.bpm > 0.0, "kick track bpm {}", k.bpm);
+}
+
+#[test]
+fn a_plan_dumped_by_an_older_version_still_loads() {
+    // Adding a field must never invalidate an existing plan: strip every field
+    // added after the first version and the rest must load, with defaults.
+    let plan = plan_of(SIGNATURE);
+    let mut v: serde_json::Value = serde_json::from_str(&plan.to_json()).unwrap();
+    for k in ["limit_seconds", "watermark_style", "static_overlay", "fast", "packs_revision"] {
+        assert!(v.as_object_mut().unwrap().remove(k).is_some(), "{k} was not in the dump");
+    }
+    let old = RenderPlan::from_json(&v.to_string()).unwrap();
+    assert_eq!(old.limit_seconds, None);
+    assert_eq!(old.watermark_style, projectmp4::render::MarkStyle::Word);
+    assert!(!old.static_overlay && !old.fast);
+    assert_eq!(old.packs_revision, None);
+    assert_eq!(old.preset_sequence, plan.preset_sequence);
+    assert_eq!(old.switches, plan.switches);
+}
+
+#[test]
+fn a_valid_limit_seconds_renders_that_much_through_the_cli() {
+    let tmp = Tmp::new();
+    let out = tmp.0.join("short.mp4");
+    let o = Command::new(env!("CARGO_BIN_EXE_projectmp4"))
+        .current_dir(&tmp.0)
+        .arg("render")
+        .arg(abs_sample("three-note-signature.m4a"))
+        .args(["--limit-seconds", "2", "--fast", "--preset"])
+        .arg(fixture("red.milk"))
+        .arg("--out")
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let p = probe(&out);
+    // 2 s at 60 fps is 120 frames; `-shortest` may trim one.
+    assert!(p.video_frames == 120 || p.video_frames == 119, "{} frames", p.video_frames);
+    assert!((p.video_duration - 2.0).abs() < 0.05, "{} s", p.video_duration);
 }

@@ -29,21 +29,50 @@ fn default_cache_dir() -> Option<PathBuf> {
     Some(PathBuf::from(home).join("Library/Application Support/agent-deck"))
 }
 
+/// What a *working* analyser found. An analyser that cannot run is an `Err`.
+#[derive(Debug, Clone)]
+pub enum Outcome {
+    Beats(Analysis),
+    /// The analyser ran and reported no beats or no downbeats (an ambient pad,
+    /// silence): a property of the music, not a fault.
+    NoBeats,
+}
+
 pub fn analyse(src: &Source, models: &Path) -> Result<Analysis> {
-    match default_cache_dir() {
-        Some(dir) => analyse_with_cache_dir(src, models, &dir),
+    match analyse_outcome(src, models)? {
+        Outcome::Beats(a) => Ok(a),
+        Outcome::NoBeats => Err(no_beats_error()),
+    }
+}
+
+fn no_beats_error() -> Error {
+    Error::msg("beat analysis returned no usable bpm/beats/downbeats/duration")
+}
+
+/// Like [`analyse`], but a beatless track is `Ok(NoBeats)` while missing or
+/// broken models, a failing analyser, or unusable output stay errors.
+pub fn analyse_outcome(src: &Source, models: &Path) -> Result<Outcome> {
+    let cached = default_cache_dir().and_then(|d| read_cache(&cache_path(&d, src)));
+    match cached {
+        Some(a) => Ok(Outcome::Beats(a)),
         None => compute(src, models),
     }
+}
+
+fn cache_path(dir: &Path, src: &Source) -> PathBuf {
+    dir.join("analysis").join(format!("{}.json", src.sha256))
 }
 
 /// `cache_dir` is the agent-deck data root; the entry lives at
 /// `<cache_dir>/analysis/<sha256>.json`.
 pub fn analyse_with_cache_dir(src: &Source, models: &Path, cache_dir: &Path) -> Result<Analysis> {
-    let path = cache_dir.join("analysis").join(format!("{}.json", src.sha256));
-    if let Some(a) = read_cache(&path) {
+    if let Some(a) = read_cache(&cache_path(cache_dir, src)) {
         return Ok(a);
     }
-    compute(src, models)
+    match compute(src, models)? {
+        Outcome::Beats(a) => Ok(a),
+        Outcome::NoBeats => Err(no_beats_error()),
+    }
 }
 
 fn read_cache(path: &Path) -> Option<Analysis> {
@@ -52,12 +81,28 @@ fn read_cache(path: &Path) -> Option<Analysis> {
     parse(&v, true)
 }
 
-fn compute(src: &Source, models: &Path) -> Result<Analysis> {
-    let v = deck_track_analysis::analyze(models, &src.wav)
-        .map_err(|e| Error::msg(format!("beat analysis failed on {}: {e}", src.wav.display())))?;
-    parse(&v, false).ok_or_else(|| {
-        Error::msg("beat analysis returned no usable bpm/beats/downbeats/duration")
-    })
+fn compute(src: &Source, models: &Path) -> Result<Outcome> {
+    let v = deck_track_analysis::analyze(models, &src.wav).map_err(|e| {
+        Error::msg(format!(
+            "beat analysis could not run on {}: {e}. The analysis models are expected in {}; \
+             check that directory exists and holds the models",
+            src.wav.display(),
+            models.display()
+        ))
+    })?;
+    if let Some(a) = parse(&v, false) {
+        return Ok(Outcome::Beats(a));
+    }
+    if is_beatless(&v) {
+        return Ok(Outcome::NoBeats);
+    }
+    Err(Error::msg("beat analysis ran but returned malformed or inconsistent output"))
+}
+
+/// The analyser ran (it reported a duration) and found no beats or no downbeats.
+fn is_beatless(v: &Value) -> bool {
+    let empty = |k: &str| v.get(k).and_then(Value::as_array).is_some_and(Vec::is_empty);
+    v.get("duration").and_then(Value::as_f64).is_some_and(|d| d > 0.0) && (empty("beats") || empty("downbeats"))
 }
 
 fn times(v: &Value, key: &str) -> Option<Vec<f64>> {

@@ -207,7 +207,8 @@ impl BlackWatch {
     }
 
     /// One render of frame `n`. True when the run of black music reaches `fps`
-    /// frames: the preset should be replaced.
+    /// frames: the preset should be replaced. The run restarts at that moment,
+    /// so a caller cannot forget to reset it after a replacement.
     pub fn observe(&mut self, n: u64, black: bool) -> bool {
         if !black || !self.is_heard(n) {
             self.run = 0;
@@ -215,7 +216,11 @@ impl BlackWatch {
         }
         self.run += 1;
         self.max_run = self.max_run.max(self.run);
-        self.run >= self.fps
+        if self.run >= self.fps {
+            self.run = 0;
+            return true;
+        }
+        false
     }
 
     pub fn reset(&mut self) {
@@ -297,7 +302,6 @@ fn run(args: &RenderArgs, prep: &Prepared) -> Result<RenderReport> {
             if list.replace_current(&pm, "rendered black for a second of music")? {
                 loads.push(LoadEvent { frame: n, preset: list.played.last().cloned().unwrap_or_default(), cut: None, smooth: list.last_smooth });
             }
-            watch.reset();
         }
 
         flip_rows(&mut px, w, h);
@@ -376,6 +380,21 @@ mod tests {
         let mut w = BlackWatch::new(FPS);
         assert_eq!(dead_at(&mut w, std::iter::repeat(0.5).take(6000)), Some(59), "the 60th black frame, not the 59th or 61st");
         assert_eq!(w.max_run, 60);
+    }
+
+    #[test]
+    fn a_dead_verdict_restarts_the_run_so_a_replacement_gets_a_fresh_second() {
+        // 125 black frames of music: dead at the 60th and again at the 120th, not
+        // on every frame after the first (which is what a run left at 60 would give).
+        let mut w = BlackWatch::new(FPS);
+        let mut dead = Vec::new();
+        for n in 0..125u64 {
+            w.hear(n, &win(0.5));
+            if w.observe(n, true) {
+                dead.push(n);
+            }
+        }
+        assert_eq!(dead, [59, 119]);
     }
 
     #[test]

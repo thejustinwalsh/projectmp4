@@ -5,7 +5,7 @@
 
 use crate::audio::analysis::DEFAULT_MODELS;
 use crate::audio::timeline::{plan_switches, Cut, SwitchPoint};
-use crate::audio::{analyse, normalise, Driver, DriverKind};
+use crate::audio::{analyse_outcome, normalise, Driver, DriverKind, Outcome};
 use crate::ffi::{Error, Result};
 use crate::presets::{default_cache_dir, Manifest, Packs};
 use crate::render::MarkStyle;
@@ -144,7 +144,8 @@ impl RenderPlan {
         let opt_str = |k: &str| match v.get(k) {
             Some(Value::Null) => Ok(None),
             Some(x) => x.as_str().map(|s| Some(s.to_string())).ok_or_else(|| bad(k)),
-            None => Err(bad(k)),
+            // A field a plan written by an older version lacks is absent, not malformed.
+            None => Ok(None),
         };
         let paths = |k: &str| -> Result<Vec<PathBuf>> {
             v.get(k)
@@ -176,9 +177,8 @@ impl RenderPlan {
             art: opt_str("art")?.map(PathBuf::from),
             fps: v.get("fps").and_then(Value::as_u64).ok_or_else(|| bad("fps"))? as u32,
             limit_seconds: match v.get("limit_seconds") {
-                Some(Value::Null) => None,
+                None | Some(Value::Null) => None,
                 Some(x) => Some(x.as_f64().ok_or_else(|| bad("limit_seconds"))?),
-                None => return Err(bad("limit_seconds")),
             },
             duration: v.get("duration").and_then(Value::as_f64).ok_or_else(|| bad("duration"))?,
             total_frames: v.get("total_frames").and_then(Value::as_u64).ok_or_else(|| bad("total_frames"))?,
@@ -188,13 +188,15 @@ impl RenderPlan {
                 Some("mix") => DriverKind::Mix,
                 _ => return Err(bad("driver")),
             },
+            // Fields added after the first version default when absent, so an
+            // older plan still loads. Adding a field must never invalidate a plan.
             watermark_style: match str_of("watermark_style").as_deref() {
-                Some("word") => MarkStyle::Word,
+                None | Some("word") => MarkStyle::Word,
                 Some("sigil") => MarkStyle::Sigil,
                 _ => return Err(bad("watermark_style")),
             },
-            static_overlay: v.get("static_overlay").and_then(Value::as_bool).ok_or_else(|| bad("static_overlay"))?,
-            fast: v.get("fast").and_then(Value::as_bool).ok_or_else(|| bad("fast"))?,
+            static_overlay: v.get("static_overlay").and_then(Value::as_bool).unwrap_or(false),
+            fast: v.get("fast").and_then(Value::as_bool).unwrap_or(false),
             packs_revision: opt_str("packs_revision")?,
             switches,
             preset_sequence: paths("preset_sequence")?,
@@ -255,10 +257,13 @@ pub(crate) fn prepare(args: &RenderArgs) -> Result<Prepared> {
     let wav_secs = wav_frames(&src.wav)? as f64 / crate::audio::normalise::PIPELINE_RATE as f64;
     // Beatless music (an ambient pad) gives the analyser nothing to find. That
     // is not a reason to refuse the track: switch on a fixed grid instead.
-    let analysis = match analyse(&src, &args.models) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("render: beat analysis found nothing usable ({e}); switching on a fixed {MIN_GAP} s grid");
+    // That applies only to an analyser that ran and found no beats. One that
+    // could not run (missing or broken models) is an error the user can fix:
+    // falling back would hide it for good.
+    let analysis = match analyse_outcome(&src, &args.models)? {
+        Outcome::Beats(a) => a,
+        Outcome::NoBeats => {
+            eprintln!("render: the track has no detectable beats; switching presets on a fixed {MIN_GAP} s grid");
             fixed_grid(wav_secs)
         }
     };
