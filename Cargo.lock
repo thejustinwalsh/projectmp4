@@ -764,6 +764,7 @@ dependencies = [
  "cosmic-text",
  "deck-media-codec",
  "deck-track-analysis",
+ "fontdb",
  "image",
  "resvg",
  "serde_json",

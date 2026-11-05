@@ -14,12 +14,37 @@ use super::mark::rasterise_symbol;
 use crate::ffi::{Error, Result};
 use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache, Weight};
 use std::path::Path;
+use std::sync::Arc;
 
 pub const SAFE_MARGIN: u32 = 64;
 pub const ART_PX: u32 = 180;
 /// Watermark growth at full bass, as a *linear* scale. Ink area grows with the
 /// square (1.2^2 = 1.44), which is what keeps loud/quiet ink under 1.6x.
 pub const MAX_MARK_SCALE: f32 = 1.2;
+
+/// Embedded typeface (SIL OFL 1.1, see assets/fonts). Requested by *name*: the
+/// FontSystem also keeps the host's fonts for fallback (CJK, Arabic, ...), and
+/// `Family::SansSerif` would resolve to a host face, so only the name pins Oswald.
+pub const OSWALD_REGULAR: &[u8] = include_bytes!("../../assets/fonts/Oswald-Regular.ttf");
+pub const OSWALD_BOLD: &[u8] = include_bytes!("../../assets/fonts/Oswald-Bold.ttf");
+const FONT_FAMILY: &str = "Oswald";
+
+/// A FontSystem holding Oswald plus whatever the host provides (the latter only
+/// for glyphs Oswald lacks).
+pub fn production_font_system() -> FontSystem {
+    FontSystem::new_with_fonts([
+        fontdb::Source::Binary(Arc::new(OSWALD_REGULAR)),
+        fontdb::Source::Binary(Arc::new(OSWALD_BOLD)),
+    ])
+}
+
+/// Title-only text tile as (width, height, premultiplied RGBA) shaped with `fs`.
+/// Exposed so tests can compare against an Oswald-only oracle.
+#[doc(hidden)]
+pub fn title_tile_pixels(fs: &mut FontSystem, title: &str) -> Result<(usize, usize, Vec<u8>)> {
+    let t = render_text_with(fs, title, None)?;
+    Ok((t.w, t.h, t.px))
+}
 
 const MARK_SVG: &str = include_str!("../../assets/gh0stf1r3.svg");
 const WORD_CAP_PX: f32 = 36.0;
@@ -158,7 +183,7 @@ fn render_mark(id: &str, cap_px: f32) -> Result<Tile> {
 }
 
 fn shape_line(fs: &mut FontSystem, text: &str, size: f32, weight: Weight, max_w: f32) -> (Buffer, f32) {
-    let attrs = Attrs::new().family(Family::SansSerif).weight(weight);
+    let attrs = Attrs::new().family(Family::Name(FONT_FAMILY)).weight(weight);
     // Titles come from untrusted tags: bound the input before the O(n) reshape loop.
     let mut chars: Vec<char> = text.chars().filter(|c| !c.is_control()).take(MAX_TEXT_CHARS).collect();
     let mut truncated = false;
@@ -208,22 +233,25 @@ fn draw_text_into(ink: &mut Tile, fs: &mut FontSystem, cache: &mut SwashCache, b
 /// Right-aligned title/artist text with halo. Err if no font is available:
 /// a render must not complete and ship without its title.
 fn render_text(title: &str, artist: Option<&str>) -> Result<Tile> {
-    let mut fs = FontSystem::new();
+    render_text_with(&mut production_font_system(), title, artist)
+}
+
+fn render_text_with(fs: &mut FontSystem, title: &str, artist: Option<&str>) -> Result<Tile> {
     if fs.db().is_empty() {
         return Err(Error::msg("overlay: no fonts available to draw the title"));
     }
     let mut cache = SwashCache::new();
-    let (mut tb, tw) = shape_line(&mut fs, title, 34.0, Weight::BOLD, TEXT_MAX_W);
-    let mut ab = artist.map(|a| shape_line(&mut fs, a, 24.0, Weight::NORMAL, TEXT_MAX_W));
+    let (mut tb, tw) = shape_line(fs, title, 34.0, Weight::BOLD, TEXT_MAX_W);
+    let mut ab = artist.map(|a| shape_line(fs, a, 24.0, Weight::NORMAL, TEXT_MAX_W));
     let w = tw.max(ab.as_ref().map_or(0.0, |a| a.1)).ceil() as usize;
     let (th, ah) = (41, 29);
     let h = th + if ab.is_some() { ah } else { 0 };
     let mut ink = Tile::new(w + 2 * HALO_PAD, h + 2 * HALO_PAD);
     let p = HALO_PAD as i64;
-    draw_text_into(&mut ink, &mut fs, &mut cache, &mut tb, p + (w as f32 - tw).round() as i64, p, 255);
+    draw_text_into(&mut ink, fs, &mut cache, &mut tb, p + (w as f32 - tw).round() as i64, p, 255);
     if let Some((buf, aw)) = ab.as_mut() {
         let aw = *aw;
-        draw_text_into(&mut ink, &mut fs, &mut cache, buf, p + (w as f32 - aw).round() as i64, p + th as i64, 215);
+        draw_text_into(&mut ink, fs, &mut cache, buf, p + (w as f32 - aw).round() as i64, p + th as i64, 215);
     }
     Ok(with_halo(&ink))
 }

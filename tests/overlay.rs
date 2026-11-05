@@ -1,3 +1,5 @@
+#[path = "common/fonts.rs"]
+mod fonts;
 use projectmp4::render::overlay::{ART_PX, BLOCK_PAD, SAFE_MARGIN};
 use projectmp4::render::{MarkStyle, Overlay};
 use std::path::{Path, PathBuf};
@@ -327,4 +329,52 @@ fn short_buffers_and_odd_sizes_never_panic_or_write_out_of_bounds() {
             }
         }
     }
+}
+
+#[test]
+fn the_title_uses_the_embedded_oswald_not_a_system_font() {
+    // Oracle: the same string through a FontSystem holding ONLY Oswald. Production also
+    // has host fonts in its db, so if it resolves "Oswald" by name the pixels are
+    // identical; if it resolves SansSerif (a host face) they are not.
+    let mine = fonts::render_title_ink("Hollow Signal");
+    let oracle = fonts::oswald_only_ink("Hollow Signal");
+    assert!(fonts::ink(&oracle) > 500, "oracle drew almost nothing: {}", fonts::ink(&oracle));
+    let diff = fonts::mean_abs_diff(&mine, &oracle);
+    assert!(diff < 1e-9, "title is not being shaped with Oswald (mean |diff| {diff})");
+    assert_eq!((mine.w, mine.h), (oracle.w, oracle.h), "title tile size differs from Oswald's");
+}
+
+#[test]
+fn cyrillic_titles_render_from_oswald_itself() {
+    // Oswald covers Cyrillic: no fallback needed, so this must match the oracle.
+    let mine = fonts::render_title_ink("Тест Сигнал");
+    let oracle = fonts::oswald_only_ink("Тест Сигнал");
+    assert!(fonts::ink(&oracle) > 500, "oracle drew almost nothing: Oswald lacks Cyrillic?");
+    assert!(fonts::ink(&mine) > 500, "Cyrillic title drew nothing");
+    let diff = fonts::mean_abs_diff(&mine, &oracle);
+    assert!(diff < 1e-9, "Cyrillic did not come from Oswald (mean |diff| {diff})");
+}
+
+#[test]
+fn glyphs_oswald_lacks_fall_back_instead_of_vanishing() {
+    // Oswald has no CJK. Production must differ from the Oswald-only oracle here:
+    // that is what proves fallback is live rather than the text dropped or tofu.
+    // (Needs a host CJK font; macOS ships several.)
+    let mine = fonts::render_title_ink("日本語");
+    let oracle = fonts::oswald_only_ink("日本語");
+    assert!(fonts::ink(&mine) > 300, "CJK title drew almost nothing: {}", fonts::ink(&mine));
+    let diff = fonts::mean_abs_diff(&mine, &oracle);
+    assert!(diff > 1e-4, "CJK rendered like an Oswald-only db, so no fallback happened (diff {diff})");
+}
+
+#[test]
+fn overlay_builds_and_draws_the_title_from_the_embedded_font_alone() {
+    // The host's fonts cannot be removed from here, so prove the two halves separately:
+    // an Oswald-only db (what a font-less host reduces to) draws the title, and the
+    // real Overlay draws it in the upper-right quadrant.
+    assert!(fonts::ink(&fonts::oswald_only_ink("Hollow Signal")) > 500);
+    let mut f = black_frame(W, H);
+    Overlay::new("Hollow Signal", None, None, MarkStyle::Word, true).unwrap().draw(&mut f, W, H, 0.0);
+    let ink = ink_in_region(&f, Region::UpperRight);
+    assert!((500.0..8000.0).contains(&ink), "title ink {ink}");
 }
