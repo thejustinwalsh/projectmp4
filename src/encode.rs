@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::Path;
+use std::time::SystemTime;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::thread::JoinHandle;
 
@@ -17,6 +18,8 @@ pub struct Encoder {
     stderr: Option<JoinHandle<Vec<u8>>>,
     frame_len: usize,
     out: String,
+    /// Modification time of an output that already existed at start.
+    prior_mtime: Option<SystemTime>,
 }
 
 /// The ffmpeg argument vector (without the program name).
@@ -59,7 +62,26 @@ pub fn ffmpeg_args(out: &Path, audio: &Path, w: u32, h: u32, fps: u32, fast: boo
 
 impl Encoder {
     pub fn start(out: &Path, audio: &Path, w: u32, h: u32, fps: u32, fast: bool) -> Result<Encoder> {
-        let mut child = Command::new("ffmpeg")
+        Self::start_with_program("ffmpeg", out, audio, w, h, fps, fast)
+    }
+
+    /// `start` with an explicit ffmpeg-compatible program (a stub, in tests).
+    pub fn start_with_program(
+        program: &str,
+        out: &Path,
+        audio: &Path,
+        w: u32,
+        h: u32,
+        fps: u32,
+        fast: bool,
+    ) -> Result<Encoder> {
+        let frame_len = (w as usize)
+            .checked_mul(h as usize)
+            .and_then(|n| n.checked_mul(4))
+            .filter(|&n| n > 0)
+            .ok_or_else(|| Error::msg(format!("invalid frame size {w}x{h}")))?;
+        let prior_mtime = std::fs::metadata(out).and_then(|m| m.modified()).ok();
+        let mut child = Command::new(program)
             .args(ffmpeg_args(out, audio, w, h, fps, fast))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -90,14 +112,10 @@ impl Encoder {
             child: Some(child),
             stdin,
             stderr: Some(stderr),
-            frame_len: w as usize * h as usize * 4,
+            frame_len,
             out: out.display().to_string(),
+            prior_mtime,
         })
-    }
-
-    /// OS process id of the ffmpeg child (for tests that kill it).
-    pub fn pid(&self) -> u32 {
-        self.child.as_ref().map_or(0, |c| c.id())
     }
 
     pub fn write_frame(&mut self, rgba: &[u8]) -> Result<()> {
@@ -135,7 +153,15 @@ impl Encoder {
         let status = child.wait().map_err(|e| Error::msg(format!("waiting for ffmpeg: {e}")))?;
         let tail = self.stderr.take().and_then(|t| t.join().ok()).unwrap_or_default();
         if status.success() {
-            return Ok(());
+            // ffmpeg exits 0 after failing to open an existing output without
+            // `-y`, leaving the old file in place: exit status alone is not
+            // proof a video was produced.
+            return match std::fs::metadata(&self.out) {
+                Ok(m) if m.len() > 0 && (self.prior_mtime.is_none() || m.modified().ok() != self.prior_mtime) => Ok(()),
+                Ok(m) if m.len() == 0 => Err(Error::msg(format!("ffmpeg exited 0 but {} is empty", self.out))),
+                Ok(_) => Err(Error::msg(format!("ffmpeg exited 0 but {} was not rewritten (stale output)", self.out))),
+                Err(e) => Err(Error::msg(format!("ffmpeg exited 0 but {} is missing: {e}", self.out))),
+            };
         }
         Err(Error::msg(format!(
             "ffmpeg writing {} exited with {status}: {}",
