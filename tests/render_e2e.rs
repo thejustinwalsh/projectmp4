@@ -565,9 +565,13 @@ fn preset_switches_land_on_their_planned_frames() {
             .filter(|&[r, g, b]| !(r > 200 && g < 60 && b < 60) && !(b > 200 && r < 60 && g < 60))
             .collect();
         println!("blended frames after {sf}: {}", blended.len());
-        // A fade has many different colours; a black flash has one (or two).
-        let distinct: std::collections::HashSet<_> = blended.iter().collect();
-        println!("after {sf}: {} blended, {} distinct", blended.len(), distinct.len());
+        // A fade passes through colours; a black flash is only black. Count the blended
+        // frames that are not near-black (measured below).
+        let lit = blended.iter().filter(|[r, g, b]| r + g + b >= 60).count();
+        println!("after {sf}: {} blended, {lit} lit", blended.len());
+        // Measured over 3 switches: every blended frame was lit (13 to 73). Black frames
+        // pass the red/blue filter below, so without this a black flash would count as a blend.
+        assert!(lit >= 4, "only {lit} of {} blended frames after frame {sf} are lit: a black flash, not a fade", blended.len());
         assert!(blended.len() >= 4, "only {} blended frames after the Soft switch at frame {sf}", blended.len());
         for [r, g, b] in &blended {
             assert!(*g < 80, "blended frame ({r},{g},{b}) is not red/blue, after frame {sf}");

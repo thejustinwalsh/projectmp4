@@ -678,8 +678,10 @@ pub fn preview(args: &RenderArgs) -> Result<()> {
     let pm = Instance::new(&gl, proc_loader())?;
     // A window whose size is not yet known can report 0x0 (as `gl_for` and the
     // `Resized` handler also guard against).
-    let size = window.inner_size();
-    let (sw, sh) = (size.width.max(1), size.height.max(1));
+    // Shadowed: every consumer below sees the clamped pair, and the raw one is gone.
+    let raw = window.inner_size();
+    let size = (raw.width.max(1), raw.height.max(1));
+    let (sw, sh) = size;
     pm.set_window_size(sw, sh);
     pm.set_mesh_size(64, 48);
     pm.set_fps(plan.fps as i32);
@@ -709,7 +711,7 @@ pub fn preview(args: &RenderArgs) -> Result<()> {
         overlay,
         gl_overlay,
         bass,
-        size: (size.width, size.height),
+        size,
         state,
         pacer: Pacer::new(plan.fps),
         fps: plan.fps,

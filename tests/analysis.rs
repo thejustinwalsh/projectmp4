@@ -155,7 +155,10 @@ fn a_cached_duration_that_disagrees_with_the_track_is_a_miss_not_a_truncation() 
 fn a_cached_duration_longer_than_the_track_is_also_a_miss() {
     let src = source_for(RAVEZILLA);
     let root = cache_with(&src.sha256, &entry(600.0, serde_json::json!([2.0, 10.0]), serde_json::json!([2.0])));
-    assert!(outcome(&src, &root, Some(300.0)).is_err());
+    // Control: the same entry is a hit for a track of its own length, so the miss below is the guard's.
+    assert!(matches!(outcome(&src, &root, Some(600.0)), Ok(Outcome::Beats(a)) if a.from_cache));
+    let e = outcome(&src, &root, Some(300.0)).expect_err("a cached duration twice the track was used");
+    assert!(e.to_string().contains("could not run"), "{e}");
 }
 
 #[test]

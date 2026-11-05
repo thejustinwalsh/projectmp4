@@ -344,14 +344,29 @@ fn wav_frames_counts_a_canonical_file_and_refuses_any_other_format() {
     assert_eq!(wav_frames(&wav_with(&dir, "ok.wav", 3, 2, 48_000, 32, &data)).unwrap(), 100);
     assert_eq!(wav_frames(&wav_with(&dir, "empty.wav", 3, 2, 48_000, 32, &[])).unwrap(), 0);
     // Each of these would divide by the wrong frame size or rate if trusted.
-    for (what, tag, ch, rate, bits) in [
-        ("44.1 kHz", 3, 2, 44_100, 32),
-        ("mono", 3, 1, 48_000, 32),
-        ("16-bit", 1, 2, 48_000, 16),
-        ("32-bit integer", 1, 2, 48_000, 32),
-        ("16-bit under a float tag", 3, 2, 48_000, 16),
+    // The last field is what the message must say was *found*; the expectation text
+    // ("expected 48000 Hz stereo 32-bit float") is in every message and proves nothing.
+    for (what, tag, ch, rate, bits, found) in [
+        ("44.1 kHz", 3, 2, 44_100, 32, "44100 Hz, 2 channel(s), 32-bit (format tag 3)"),
+        ("mono", 3, 1, 48_000, 32, "48000 Hz, 1 channel(s), 32-bit (format tag 3)"),
+        ("16-bit", 1, 2, 48_000, 16, "48000 Hz, 2 channel(s), 16-bit (format tag 1)"),
+        ("32-bit integer", 1, 2, 48_000, 32, "48000 Hz, 2 channel(s), 32-bit (format tag 1)"),
+        ("16-bit under a float tag", 3, 2, 48_000, 16, "48000 Hz, 2 channel(s), 16-bit (format tag 3)"),
     ] {
         let e = wav_frames(&wav_with(&dir, "bad.wav", tag, ch, rate, bits, &data)).expect_err(what);
-        assert!(e.to_string().contains("not a normalised WAV") && e.to_string().contains("48000"), "{what}: {e}");
+        assert!(e.to_string().contains("not a normalised WAV") && e.to_string().contains(found), "{what}: {e}");
     }
+}
+
+#[test]
+fn prepare_refuses_a_source_whose_wav_holds_no_samples() {
+    // `normalise` never emits such a file, so the plan is handed one directly: this pins
+    // that `prepare` itself calls the guard, not just that the guard works.
+    use projectmp4::render::plan::{render_plan_from_source, RenderArgs};
+    let dir = tmpdir();
+    let wav = wav_with(&dir, "empty.wav", 3, 2, 48_000, 32, &[]);
+    assert_eq!(projectmp4::audio::wav_frames(&wav).unwrap(), 0, "premise: a valid WAV, zero frames");
+    let src = Source { wav, sha256: SHA.into(), duration: 0.0, title: None, artist: None };
+    let e = render_plan_from_source(&RenderArgs::new("ambient.mp3"), src).expect_err("an empty decode produced a plan");
+    assert!(e.to_string().contains("ambient.mp3") && e.to_string().contains("no audio samples"), "{e}");
 }

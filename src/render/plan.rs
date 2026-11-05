@@ -259,6 +259,17 @@ pub(crate) fn prepare(args: &RenderArgs) -> Result<Prepared> {
     }
     let tmp = TempDir::new()?;
     let src = normalise(&args.input, &tmp.0)?;
+    prepare_with(args, tmp, src)
+}
+
+/// Plan an already-normalised source. Public so a test can hand it a WAV that
+/// `normalise` itself would never produce (a header with no samples) and watch
+/// `prepare`'s own call to `require_samples` refuse it.
+pub fn render_plan_from_source(args: &RenderArgs, src: crate::audio::Source) -> Result<RenderPlan> {
+    prepare_with(args, TempDir::new()?, src).map(|p| p.plan)
+}
+
+fn prepare_with(args: &RenderArgs, tmp: TempDir, src: crate::audio::Source) -> Result<Prepared> {
     let frames = require_samples(wav_frames(&src.wav)?, &args.input)?;
     let wav_secs = frames as f64 / PIPELINE_RATE as f64;
     // Beatless music (an ambient pad) gives the analyser nothing to find. That
@@ -277,7 +288,7 @@ pub(crate) fn prepare(args: &RenderArgs) -> Result<Prepared> {
     let driver = Driver::load(&src, args.driver)?;
     let (mut switches, fill) = plan_switches_reporting(&analysis, &driver, MIN_GAP, DROP_GAP);
     if !beatless {
-        if let Some(n) = fill.notice(wav_secs, MIN_GAP) {
+        if let Some(n) = fill.notice(wav_secs) {
             eprintln!("render: {n}");
         }
     }

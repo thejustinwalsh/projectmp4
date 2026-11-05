@@ -93,6 +93,9 @@ pub struct GridFill {
     pub added: usize,
     /// Seconds of the track that had no downbeat to switch on.
     pub secs: f64,
+    /// The grid spacing the points were laid at: what [`notice`](Self::notice)
+    /// reports, so the figure cannot disagree with the grid actually used.
+    pub grid: f64,
 }
 
 /// The grid is worth mentioning once it carried this share of the track...
@@ -104,13 +107,14 @@ const NOTICE_SECS: f64 = 60.0;
 
 impl GridFill {
     /// What to tell the user, or `None` when the grid covered too little to matter.
-    pub fn notice(&self, duration: f64, grid: f64) -> Option<String> {
+    pub fn notice(&self, duration: f64) -> Option<String> {
         let enough = self.secs >= NOTICE_SECS || self.secs >= NOTICE_FRACTION * duration;
         (self.added > 0 && enough).then(|| {
             format!(
-                "{:.0} s of this {duration:.0} s track ran on a fixed {grid} s interval instead of following the music: \
+                "{:.0} s of this {duration:.0} s track ran on a fixed {} s interval instead of following the music: \
                  the analysis found no downbeats there (common in ambient intros, long breakdowns and outros)",
-                self.secs
+                self.secs,
+                self.grid
             )
         })
     }
@@ -130,7 +134,7 @@ const MIN_DOWNBEATS: usize = 2;
 /// same as zero; so a track too short for the `2 * grid` rule still gets one.
 pub fn fill_gaps(downbeats: &[f64], duration: f64, grid: f64) -> (Vec<f64>, GridFill) {
     let mut out: Vec<f64> = downbeats.iter().copied().filter(|t| t.is_finite() && *t >= 0.0 && *t < duration).collect();
-    let mut fill = GridFill::default();
+    let mut fill = GridFill { grid, ..GridFill::default() };
     if !(grid.is_finite() && grid > 0.0 && duration.is_finite()) {
         return (out, fill);
     }
