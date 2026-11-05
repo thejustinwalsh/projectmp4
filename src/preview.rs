@@ -13,14 +13,17 @@
 //! past), and counts what it skipped. The audio callback touches no GL and
 //! takes no lock that can block it.
 //!
-//! Not drawn: the title/art/watermark overlay (it is composited on the CPU
-//! from a readback that preview avoids), and the render's replacement of a
-//! preset that renders black (that needs the readback too).
+//! The title/art/watermark overlay is drawn on the GPU from the render's own
+//! tiles ([`crate::gl_overlay`]). Not reproduced: the render's replacement of a
+//! preset that renders black, which needs a per-frame readback preview avoids.
 
 use crate::audio::timeline::Cut;
 use winit::keyboard::{KeyCode, PhysicalKey};
 use crate::ffi::{Error, Instance, MakeCurrent, Result};
 use crate::gl_context::proc_loader;
+use crate::gl_overlay::GlOverlay;
+use crate::render::r#loop::bass_per_frame;
+use crate::render::Overlay;
 use crate::render::plan::{prepare, RenderArgs, RenderPlan};
 use crate::render::r#loop::switch_frames;
 use std::path::{Path, PathBuf};
@@ -504,6 +507,11 @@ struct App<'a> {
     pm: &'a Instance<'a>,
     audio: &'a AudioOut,
     driver: &'a crate::audio::Driver,
+    overlay: Overlay,
+    gl_overlay: GlOverlay,
+    /// Bass level per frame, as the render computes it for the watermark pulse.
+    bass: Vec<f32>,
+    size: (u32, u32),
     state: PreviewState,
     pacer: Pacer,
     fps: u32,
@@ -553,6 +561,8 @@ impl App<'_> {
         self.pm.set_frame_time(due.frame as f64 / self.fps as f64);
         let t0 = Instant::now();
         self.pm.render_frame_fbo(0);
+        let bass = self.bass.get(due.frame as usize).or(self.bass.last()).copied().unwrap_or(0.0);
+        self.gl_overlay.draw(&self.overlay, self.size.0, self.size.1, bass);
         self.stats.render_total += t0.elapsed();
         self.gl.surface.swap_buffers(&self.gl.ctx).map_err(|e| Error::msg(format!("swap buffers: {e}")))?;
         let took = started.elapsed();
@@ -601,6 +611,7 @@ impl ApplicationHandler for App<'_> {
                     self.gl.surface.resize(&self.gl.ctx, w, h);
                 }
                 self.pm.set_window_size(size.width, size.height);
+                self.size = (size.width, size.height);
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && !event.repeat => {
                 if let PhysicalKey::Code(code) = event.physical_key {
@@ -657,6 +668,9 @@ pub fn preview(args: &RenderArgs) -> Result<()> {
     }
 
     let state = PreviewState::from_plan(plan)?;
+    let overlay = Overlay::new(&plan.title, plan.artist.as_deref(), plan.art.as_deref(), plan.watermark_style, !plan.static_overlay)?;
+    let gl_overlay = GlOverlay::new(&overlay, size.width, size.height)?;
+    let bass = bass_per_frame(&prep.driver, plan.fps, plan.total_frames);
     let first = Load { path: state.current().to_owned(), smooth: false };
     eprintln!(
         "preview: {} - {:.0} s, {} presets scheduled. Right/Left: step off the schedule. L: lock. P: print preset path. Esc: quit.",
@@ -672,6 +686,10 @@ pub fn preview(args: &RenderArgs) -> Result<()> {
         pm: &pm,
         audio: &audio,
         driver: &prep.driver,
+        overlay,
+        gl_overlay,
+        bass,
+        size: (size.width, size.height),
         state,
         pacer: Pacer::new(plan.fps),
         fps: plan.fps,
@@ -683,7 +701,11 @@ pub fn preview(args: &RenderArgs) -> Result<()> {
         error: None,
     };
     app.load(first);
-    event_loop.run_app(&mut app).map_err(|e| Error::msg(format!("event loop: {e}")))?;
+    let ran = event_loop.run_app(&mut app).map_err(|e| Error::msg(format!("event loop: {e}")));
+    if gl.make_current().is_ok() {
+        app.gl_overlay.delete();
+    }
+    ran?;
     if let Some(e) = app.error.take() {
         return Err(e);
     }

@@ -3,4 +3,4 @@ pub mod mark;
 pub mod plan;
 pub mod r#loop;
 pub mod overlay;
-pub use overlay::{MarkStyle, Overlay};
+pub use overlay::{Layer, MarkStyle, Overlay};

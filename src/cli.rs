@@ -32,8 +32,7 @@ enum Cmd {
     ///
     /// Right/Left step to the next/previous preset (off the schedule until the
     /// next planned switch), L locks the preset on screen, P prints its path
-    /// (pass it to `render --preset`), Esc quits. Title, art and watermark are
-    /// not drawn.
+    /// (pass it to `render --preset`), Esc quits.
     Preview(PlanCmd),
     /// Render an audio file to mp4.
     Render(RenderCmd),
@@ -60,24 +59,6 @@ struct PlanCmd {
     /// Use only the first N seconds.
     #[arg(long, value_parser = parse_limit)]
     limit_seconds: Option<f64>,
-}
-
-impl PlanCmd {
-    fn args(self) -> RenderArgs {
-        let mut a = RenderArgs::new(self.input);
-        a.profile = self.profile;
-        a.presets = self.preset;
-        a.fps = self.fps;
-        a.driver = self.driver;
-        a.limit_seconds = self.limit_seconds;
-        a
-    }
-}
-
-#[derive(Args)]
-struct RenderCmd {
-    #[command(flatten)]
-    plan: PlanCmd,
     /// Defaults to the file's title tag, then its file name.
     #[arg(long)]
     title: Option<String>,
@@ -93,6 +74,29 @@ struct RenderCmd {
     /// Watermark does not pulse with the bass.
     #[arg(long)]
     static_overlay: bool,
+}
+
+impl PlanCmd {
+    fn args(self) -> RenderArgs {
+        let mut a = RenderArgs::new(self.input);
+        a.profile = self.profile;
+        a.presets = self.preset;
+        a.fps = self.fps;
+        a.driver = self.driver;
+        a.limit_seconds = self.limit_seconds;
+        a.title = self.title;
+        a.artist = self.artist;
+        a.art = self.art;
+        a.watermark_style = self.watermark_style;
+        a.static_overlay = self.static_overlay;
+        a
+    }
+}
+
+#[derive(Args)]
+struct RenderCmd {
+    #[command(flatten)]
+    plan: PlanCmd,
     /// Hardware encode (VideoToolbox): faster, larger.
     #[arg(long)]
     fast: bool,
@@ -163,11 +167,6 @@ fn rank(out: &std::path::Path) -> Result<()> {
 
 fn render_cmd(c: RenderCmd) -> Result<()> {
     let mut a = c.plan.args();
-    a.title = c.title;
-    a.artist = c.artist;
-    a.art = c.art;
-    a.watermark_style = c.watermark_style;
-    a.static_overlay = c.static_overlay;
     a.fast = c.fast;
     a.out = c.out;
     a.progress = true;

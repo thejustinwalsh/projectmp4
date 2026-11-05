@@ -445,3 +445,62 @@ fn the_artist_line_is_oswald_regular_below_the_title() {
     let diff = fonts::mean_abs_diff(&mine, &oracle);
     assert!(diff < 1e-9, "artist line differs from Oswald Regular (mean |diff| {diff})");
 }
+
+// --- Layers: what the preview uploads to the GPU must be what `draw` blends ---
+
+/// Every pixel of `layer` that has any alpha, as it lands on a transparent-black
+/// frame (premultiplied source over black is the source), must be in `frame` at
+/// the layer's position, and nowhere else may the frame be non-black.
+fn assert_layers_are_what_was_drawn(frame: &[u8], layers: &[projectmp4::render::Layer<'_>]) {
+    let mut expect = black_frame(W, H);
+    for l in layers {
+        for j in 0..l.h {
+            for i in 0..l.w {
+                let s = &l.px[(j * l.w + i) * 4..][..4];
+                let (x, y) = (l.x + i as i64, l.y + j as i64);
+                assert!(x >= 0 && y >= 0 && x < W as i64 && y < H as i64, "layer pixel outside the frame");
+                if s[3] > 0 {
+                    expect[((y as u32 * W + x as u32) * 4) as usize..][..3].copy_from_slice(&s[..3]);
+                }
+            }
+        }
+    }
+    // Layers do not overlap here, so over-black is a plain copy.
+    assert!(frame == expect.as_slice(), "the drawn frame differs from the layers");
+}
+
+#[test]
+fn the_gpu_layers_are_the_pixels_draw_blends() {
+    let o = Overlay::new("Layer Title", Some("An Artist"), None, MarkStyle::Word, true).unwrap();
+    let bass = 0.7;
+    let mut frame = black_frame(W, H);
+    o.draw(&mut frame, W, H, bass);
+    let block = o.block_layer(W, H).expect("a title makes a block");
+    let mark = o.mark_layer(o.mark_index(bass), W, H);
+    assert_layers_are_what_was_drawn(&frame, &[block, mark]);
+}
+
+#[test]
+fn bass_selects_the_watermark_tile() {
+    let o = Overlay::new("T", None, None, MarkStyle::Word, true).unwrap();
+    let last = o.mark_layers(W, H).len() - 1;
+    assert!(last > 0, "a reactive overlay has several tiles");
+    assert_eq!(o.mark_index(0.0), 0);
+    assert_eq!(o.mark_index(1.0), last);
+    assert_eq!(o.mark_index(2.0), last, "clamped");
+    assert_eq!(o.mark_index(-1.0), 0, "clamped");
+    assert_eq!(o.mark_index(f32::NAN), 0);
+    let mid = o.mark_index(0.5);
+    assert!(mid > 0 && mid < last, "{mid} of {last}");
+    assert!((0..=10).map(|i| o.mark_index(i as f32 / 10.0)).collect::<Vec<_>>().windows(2).all(|w| w[0] <= w[1]));
+
+    let s = Overlay::new("T", None, None, MarkStyle::Word, false).unwrap();
+    assert_eq!(s.mark_layers(W, H).len(), 1);
+    assert_eq!(s.mark_index(1.0), 0, "a static overlay ignores bass");
+}
+
+#[test]
+fn an_overlay_with_no_title_or_art_has_no_block_layer() {
+    let o = Overlay::new("", None, None, MarkStyle::Word, true).unwrap();
+    assert!(o.block_layer(W, H).is_none());
+}

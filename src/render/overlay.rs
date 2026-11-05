@@ -389,14 +389,62 @@ impl Overlay {
             Some(need) if need > 0 && frame.len() >= need => {}
             _ => return,
         }
-        let m = SAFE_MARGIN as i64;
         if let Some(b) = &self.block {
-            blend(frame, w, h, b, w as i64 - m - b.w as i64, m, false);
+            let (x, y) = Self::block_origin(b, w, h);
+            blend(frame, w, h, b, x, y, false);
         }
-        let bass = if self.reactive && !bass.is_nan() { bass.clamp(0.0, 1.0) } else { 0.0 };
-        let idx = (bass * (self.marks.len() - 1) as f32).round() as usize;
+        let idx = self.mark_index(bass);
         let t = &self.marks[idx];
-        // Anchored at the padded tile's lower-left corner: growth goes up and right.
-        blend(frame, w, h, t, m, h as i64 - m - t.h as i64, false);
+        let (x, y) = Self::mark_origin(t, w, h);
+        blend(frame, w, h, t, x, y, false);
     }
+
+    /// Top-left of the title block in a `w`*`h` frame: anchored top-right on the safe margin.
+    fn block_origin(b: &Tile, w: usize, _h: usize) -> (i64, i64) {
+        let m = SAFE_MARGIN as i64;
+        (w as i64 - m - b.w as i64, m)
+    }
+
+    /// Top-left of a watermark tile: anchored at its padded lower-left corner on the
+    /// safe margin, so growth goes up and right.
+    fn mark_origin(t: &Tile, _w: usize, h: usize) -> (i64, i64) {
+        let m = SAFE_MARGIN as i64;
+        (m, h as i64 - m - t.h as i64)
+    }
+
+    /// Which watermark tile `bass` selects. `bass` is clamped to 0..=1 and ignored
+    /// unless the overlay is reactive.
+    pub fn mark_index(&self, bass: f32) -> usize {
+        let bass = if self.reactive && !bass.is_nan() { bass.clamp(0.0, 1.0) } else { 0.0 };
+        (bass * (self.marks.len() - 1) as f32).round() as usize
+    }
+
+    /// The title block as a premultiplied RGBA8 layer for a `w`*`h` frame.
+    pub fn block_layer(&self, w: u32, h: u32) -> Option<Layer<'_>> {
+        let b = self.block.as_ref()?;
+        let (x, y) = Self::block_origin(b, w as usize, h as usize);
+        Some(Layer { x, y, w: b.w, h: b.h, px: &b.px })
+    }
+
+    /// Every watermark tile (index = [`mark_index`](Self::mark_index)) placed in a `w`*`h` frame.
+    pub fn mark_layers(&self, w: u32, h: u32) -> Vec<Layer<'_>> {
+        (0..self.marks.len()).map(|i| self.mark_layer(i, w, h)).collect()
+    }
+
+    /// Watermark tile `idx` placed in a `w`*`h` frame.
+    pub fn mark_layer(&self, idx: usize, w: u32, h: u32) -> Layer<'_> {
+        let t = &self.marks[idx];
+        let (x, y) = Self::mark_origin(t, w as usize, h as usize);
+        Layer { x, y, w: t.w, h: t.h, px: &t.px }
+    }
+}
+
+/// A premultiplied RGBA8 tile (rows top-down) and where its top-left pixel
+/// goes in the frame, in pixels from the top-left corner.
+pub struct Layer<'a> {
+    pub x: i64,
+    pub y: i64,
+    pub w: usize,
+    pub h: usize,
+    pub px: &'a [u8],
 }
