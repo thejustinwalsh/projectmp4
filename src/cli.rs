@@ -69,11 +69,17 @@ struct RenderCmd {
     #[arg(long)]
     out: Option<PathBuf>,
     /// Render only the first N seconds.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_limit)]
     limit_seconds: Option<f64>,
     /// Write the render plan as JSON to this path and exit without rendering.
     #[arg(long)]
     dump_plan: Option<PathBuf>,
+}
+
+fn parse_limit(s: &str) -> std::result::Result<f64, String> {
+    let v: f64 = s.parse().map_err(|_| format!("{s:?} is not a number"))?;
+    crate::render::plan::check_limit(v).map_err(|e| e.0.into_owned())?;
+    Ok(v)
 }
 
 fn parse_driver(s: &str) -> std::result::Result<DriverKind, String> {

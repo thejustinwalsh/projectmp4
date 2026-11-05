@@ -84,8 +84,10 @@ pub struct RenderPlan {
     pub artist: Option<String>,
     pub art: Option<PathBuf>,
     pub fps: u32,
-    /// Length of the decoded audio the video is laid over.
+    /// Seconds rendered: the decoded audio's length, or `limit_seconds` if shorter.
     pub duration: f64,
+    /// The trial-render limit this plan was made with, if any.
+    pub limit_seconds: Option<f64>,
     /// `ceil(duration * fps)`.
     pub total_frames: u64,
     pub bpm: f32,
@@ -116,6 +118,7 @@ impl RenderPlan {
             "art": self.art.as_ref().map(|p| p.to_string_lossy().into_owned()),
             "fps": self.fps,
             "duration": self.duration,
+            "limit_seconds": self.limit_seconds,
             "total_frames": self.total_frames,
             "bpm": self.bpm,
             "driver": match self.driver { DriverKind::Stems => "stems", DriverKind::Mix => "mix" },
@@ -172,6 +175,11 @@ impl RenderPlan {
             artist: opt_str("artist")?,
             art: opt_str("art")?.map(PathBuf::from),
             fps: v.get("fps").and_then(Value::as_u64).ok_or_else(|| bad("fps"))? as u32,
+            limit_seconds: match v.get("limit_seconds") {
+                Some(Value::Null) => None,
+                Some(x) => Some(x.as_f64().ok_or_else(|| bad("limit_seconds"))?),
+                None => return Err(bad("limit_seconds")),
+            },
             duration: v.get("duration").and_then(Value::as_f64).ok_or_else(|| bad("duration"))?,
             total_frames: v.get("total_frames").and_then(Value::as_u64).ok_or_else(|| bad("total_frames"))?,
             bpm: v.get("bpm").and_then(Value::as_f64).ok_or_else(|| bad("bpm"))? as f32,
@@ -239,11 +247,23 @@ pub(crate) fn prepare(args: &RenderArgs) -> Result<Prepared> {
     if args.fps == 0 || args.fps > 240 {
         return Err(Error::msg(format!("--fps {} is out of range 1..=240", args.fps)));
     }
+    if let Some(l) = args.limit_seconds {
+        check_limit(l)?;
+    }
     let tmp = TempDir::new()?;
     let src = normalise(&args.input, &tmp.0)?;
-    let analysis = analyse(&src, &args.models)?;
+    let wav_secs = wav_frames(&src.wav)? as f64 / crate::audio::normalise::PIPELINE_RATE as f64;
+    // Beatless music (an ambient pad) gives the analyser nothing to find. That
+    // is not a reason to refuse the track: switch on a fixed grid instead.
+    let analysis = match analyse(&src, &args.models) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("render: beat analysis found nothing usable ({e}); switching on a fixed {MIN_GAP} s grid");
+            fixed_grid(wav_secs)
+        }
+    };
     let driver = Driver::load(&src, args.driver)?;
-    let switches = plan_switches(&analysis, &driver, MIN_GAP, DROP_GAP);
+    let mut switches = plan_switches(&analysis, &driver, MIN_GAP, DROP_GAP);
 
     let non_empty = |s: &Option<String>| s.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
     let stem = args.input.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
@@ -251,34 +271,42 @@ pub(crate) fn prepare(args: &RenderArgs) -> Result<Prepared> {
     let artist = non_empty(&args.artist).or_else(|| src.artist.clone());
 
     let (pool, textures) = resolve_pool(args)?;
-    let preset_sequence: Vec<PathBuf> =
-        (0..=switches.len()).map(|i| pool[i % pool.len()].clone()).collect();
 
     // The audio the encoder muxes (and `-shortest` trims to) is the normalised
     // WAV, so its length, not the stems', sets the video length. Stems can be
     // shorter (ravezilla: 8,277,120 vs 8,277,768 frames) or, in principle,
     // longer; the driver reads zeros past its end.
-    let duration = wav_frames(&src.wav)? as f64 / driver.rate as f64;
+    let duration = wav_secs;
     // The tiny subtraction keeps an exact multiple (12.0 s * 60) from rounding up a frame.
-    let shown = args.limit_seconds.filter(|l| *l > 0.0).map_or(duration, |l| l.min(duration));
+    let shown = args.limit_seconds.map_or(duration, |l| l.min(duration));
     let total_frames = (shown * args.fps as f64 - 1e-9).ceil().max(1.0) as u64;
+    // A switch the render never reaches is not part of the plan.
+    switches.retain(|s| s.t < shown);
+    let preset_sequence: Vec<PathBuf> =
+        (0..=switches.len()).map(|i| pool[i % pool.len()].clone()).collect();
     let plan = RenderPlan {
         input: args.input.clone(),
         title,
         artist,
         art: args.art.clone(),
         fps: args.fps,
-        duration,
+        duration: shown,
+        limit_seconds: args.limit_seconds,
         total_frames,
         bpm: analysis.bpm,
         driver: driver.kind,
         watermark_style: args.watermark_style,
         static_overlay: args.static_overlay,
         fast: args.fast,
-        packs_revision: crate::presets::packs::sources()
-            .ok()
-            .and_then(|v| v.into_iter().find(|s| s.name == "presets-cream-of-the-crop"))
-            .map(|s| s.commit),
+        // Only a pool resolved from the packs has a pack revision to record.
+        packs_revision: if args.presets.is_empty() {
+            crate::presets::packs::sources()
+                .ok()
+                .and_then(|v| v.into_iter().find(|s| s.name == "presets-cream-of-the-crop"))
+                .map(|s| s.commit)
+        } else {
+            None
+        },
         switches,
         preset_sequence,
         pool,
@@ -336,4 +364,21 @@ fn wav_frames(path: &std::path::Path) -> Result<u64> {
         }
         f.seek(SeekFrom::Current(((size + 1) & !1) as i64)).map_err(err)?;
     }
+}
+
+/// A trial-render limit must be a positive, finite number of seconds: anything
+/// else would silently mean "the whole track".
+pub fn check_limit(l: f64) -> Result<()> {
+    if l.is_finite() && l > 0.0 {
+        Ok(())
+    } else {
+        Err(Error::msg(format!("--limit-seconds must be a positive number of seconds, got {l}")))
+    }
+}
+
+/// Stand-in for a failed beat analysis: a "downbeat" every `MIN_GAP` seconds
+/// (bpm 0 marks it as not measured).
+fn fixed_grid(duration: f64) -> crate::audio::Analysis {
+    let grid: Vec<f64> = (0..).map(|i| i as f64 * MIN_GAP).take_while(|t| *t < duration).collect();
+    crate::audio::Analysis { bpm: 0.0, beats: grid.clone(), downbeats: grid, duration, from_cache: false }
 }

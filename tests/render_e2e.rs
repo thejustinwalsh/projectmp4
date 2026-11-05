@@ -36,6 +36,30 @@ fn input_duration(path: &str) -> f64 {
     j["format"]["duration"].as_str().unwrap().parse().unwrap()
 }
 
+/// Frames the video should have: the audio as the encoder receives it (decoded to
+/// 48 kHz stereo), measured here by a separate ffmpeg decode, times fps, rounded up.
+fn expected_frames(input: &str) -> u64 {
+    let o = Command::new("ffmpeg")
+        .args(["-v", "error", "-nostdin", "-i", input, "-vn", "-ac", "2", "-ar", "48000", "-f", "f32le", "-"])
+        .output()
+        .unwrap();
+    assert!(o.status.success());
+    let secs = (o.stdout.len() / 8) as f64 / 48_000.0;
+    (secs * FPS as f64 - 1e-9).ceil() as u64
+}
+
+/// Exact: the plan and the loop agree with the decoded audio to the frame. The
+/// file may hold one frame fewer, never more: with `-shortest` ffmpeg ends the
+/// video where the (AAC, slightly shorter) audio ends. Measured: signature
+/// 721 written -> 720 kept, ravezilla 10348 -> 10347.
+fn assert_frames(r: &RenderReport, input: &str) {
+    let want = expected_frames(input);
+    assert_eq!(r.plan.total_frames, want, "plan");
+    assert_eq!(r.frames_written, want, "frames handed to the encoder");
+    let kept = probe(&r.out).video_frames as u64;
+    assert!(kept == want || kept + 1 == want, "file holds {kept} frames, {want} were written");
+}
+
 struct Probe {
     width: i64,
     height: i64,
@@ -142,9 +166,8 @@ fn renders_a_short_track_end_to_end() {
     );
     // The audio is the input, to within AAC's one-packet (1024 sample) padding.
     assert!((p.audio_duration - input).abs() <= 1024.0 / 48_000.0 + 1e-3, "audio {} s vs input {input} s", p.audio_duration);
-    // Frame count against the input's length, not the output's own duration.
-    let expect = (input * FPS as f64).ceil() as i64;
-    assert!((p.video_frames - expect).abs() <= 1, "{} frames, expected {expect} +-1", p.video_frames);
+    // Frame count against the input's decoded audio, not the output's own duration.
+    assert_frames(r, MOTIF);
 }
 
 #[test]
@@ -185,8 +208,7 @@ fn a_broken_preset_is_skipped_not_fatal() {
     // Only the good preset ran, for every segment.
     assert_eq!(r.played.len(), r.plan.preset_sequence.len());
     assert!(r.played.iter().all(|p| p == &good), "{:?}", r.played);
-    // `-shortest` may trim the last frame when the AAC stream ends a few ms early.
-    assert!((probe(&r.out).video_frames - r.frames as i64).abs() <= 1);
+    assert_frames(r, SIGNATURE);
 
     // And the picture is the good preset's: not black, and not the idle logo
     // projectM shows when a load fails (which lights ~99% of pixels; basic.milk ~28%).
@@ -268,9 +290,8 @@ fn plan_is_structurally_deterministic() {
     assert!(!a.switches.is_empty(), "a 12 s track at an 8 s gap has a switch");
     assert_eq!(a.preset_sequence.len(), a.switches.len() + 1);
     assert_ne!(a.preset_sequence[0], a.preset_sequence[1], "every segment got the same preset");
-    // Sized by the decoded audio (12.0135 s: AAC padding), within a frame of the container's 12.000 s.
-    let expect = (input_duration(SIGNATURE) * FPS as f64).ceil() as i64;
-    assert!((a.total_frames as i64 - expect).abs() <= 1, "{} frames vs {expect}", a.total_frames);
+    // Sized by the decoded audio (12.0135 s: AAC padding; the container says 12.000).
+    assert_eq!(a.total_frames, expected_frames(SIGNATURE));
 }
 
 #[test]
@@ -322,21 +343,31 @@ impl Drop for Tmp {
     }
 }
 
-/// 48 kHz stereo 16-bit WAV from `(seconds, loud)` segments: loud is two
-/// decaying 60 Hz kicks per second, quiet is digital silence.
-fn write_synth_wav(path: &Path, segments: &[(f64, bool)]) {
+#[derive(Clone, Copy)]
+enum Tone {
+    /// Two decaying 60 Hz kicks per second, peak 0.8.
+    Kicks,
+    /// A steady 220 Hz sine at this peak amplitude (0.0056 is -45 dBFS).
+    Pad(f64),
+    Silence,
+}
+
+/// 48 kHz stereo 16-bit WAV from `(seconds, tone)` segments.
+fn write_synth_wav(path: &Path, segments: &[(f64, Tone)]) {
     let rate = 48_000usize;
     let mut pcm: Vec<u8> = Vec::new();
-    for &(secs, loud) in segments {
+    for &(secs, tone) in segments {
         for i in 0..(secs * rate as f64) as usize {
             let t = i as f64 / rate as f64;
-            let v = if loud {
-                let ph = (t * 2.0) % 1.0;
-                0.8 * (-ph * 12.0).exp() * (std::f64::consts::TAU * 60.0 * t).sin()
-            } else {
-                0.0
+            let v = match tone {
+                Tone::Kicks => {
+                    let ph = (t * 2.0) % 1.0;
+                    0.8 * (-ph * 12.0).exp() * (std::f64::consts::TAU * 60.0 * t).sin()
+                }
+                Tone::Pad(amp) => amp * (std::f64::consts::TAU * 220.0 * t).sin(),
+                Tone::Silence => 0.0,
             };
-            let q = ((v * 32767.0) as i16).to_le_bytes();
+            let q = ((v * 32767.0).round() as i16).to_le_bytes();
             pcm.extend_from_slice(&[q[0], q[1], q[0], q[1]]);
         }
     }
@@ -374,7 +405,7 @@ fn a_silent_gap_does_not_burn_through_the_preset_pool() {
     // used to exhaust the pool and abort the render, and must cost none.
     let tmp = Tmp::new();
     let wav = tmp.0.join("gap.wav");
-    write_synth_wav(&wav, &[(6.0, true), (50.0, false)]);
+    write_synth_wav(&wav, &[(6.0, Tone::Kicks), (50.0, Tone::Silence)]);
     let mut a = RenderArgs::new(&wav);
     a.presets = copies_of("black", &tmp.0, 40);
     a.out = Some(tmp.0.join("gap.mp4"));
@@ -383,32 +414,67 @@ fn a_silent_gap_does_not_burn_through_the_preset_pool() {
     assert!(r.out.exists());
     assert!(!r.pool_exhausted);
     assert!((5..=6).contains(&r.skipped.len()), "{} presets skipped, expected one per audible second", r.skipped.len());
-    let expect = (input_duration(wav.to_str().unwrap()) * FPS as f64).ceil() as i64;
-    assert!((probe(&r.out).video_frames - expect).abs() <= 1);
+    assert_frames(&r, wav.to_str().unwrap());
 }
 
 #[test]
 fn running_out_of_presets_does_not_abort_the_render() {
-    // Every candidate draws nothing while music plays: all are skipped, and the
-    // render finishes anyway on the last one rather than throwing away its work.
+    // Every candidate draws nothing while music plays: each is set aside, all are
+    // re-admitted when none is left, and the render finishes as a complete file.
     let tmp = Tmp::new();
     let wav = tmp.0.join("loud.wav");
-    write_synth_wav(&wav, &[(6.0, true)]);
+    write_synth_wav(&wav, &[(6.0, Tone::Kicks)]);
     let mut a = RenderArgs::new(&wav);
-    a.presets = copies_of("black", &tmp.0, 2);
+    let pool = copies_of("black", &tmp.0, 2);
+    a.presets = pool.clone();
     a.out = Some(tmp.0.join("loud.mp4"));
     a.fast = true;
     let r = render_report(&a).expect("exhausting the pool must not abort");
     assert!(r.pool_exhausted);
-    // One was skipped; the last candidate stays on screen instead of being skipped too.
-    assert_eq!(r.skipped.len(), 1, "{:?}", r.skipped);
-    assert_eq!(r.played.len(), 1);
-    assert_eq!(probe(&r.out).video_frames, r.frames as i64);
+    // Both were condemned, and the pool did not shrink to one: the second was
+    // loaded again after the first was forgiven.
+    for p in &pool {
+        assert!(r.skipped.iter().any(|s| &s.preset == p), "{p:?} never skipped: {:?}", r.skipped);
+    }
+    assert!(r.loads.len() >= 4, "{:?}", r.loads);
+    assert_frames(&r, wav.to_str().unwrap());
+    // A complete, playable file: the audio is there too (probe panics without it).
+    assert!((probe(&r.out).audio_duration - 6.0).abs() < 0.05);
 }
 
-/// Dominant colour of the middle of each requested output frame, as "red",
-/// "blue" or "other".
-fn colours_at(out: &Path, frames: &[u64]) -> Vec<&'static str> {
+#[test]
+fn ambient_music_does_not_leave_the_render_stuck_on_one_preset() {
+    // A pad at -45 dBFS: far quieter than the kicks, well above the audibility
+    // threshold. Presets that stay dark over it are condemned one a second; with 8
+    // in the pool the pool is spent after ~8 s. A condemnation that never expired
+    // would leave one preset on screen for the remaining 12 s; instead they are
+    // forgiven and cycled, so presets keep changing for the whole track.
+    let tmp = Tmp::new();
+    let wav = tmp.0.join("pad.wav");
+    write_synth_wav(&wav, &[(20.0, Tone::Pad(0.0056))]);
+    let mut a = RenderArgs::new(&wav);
+    a.presets = copies_of("black", &tmp.0, 8);
+    a.out = Some(tmp.0.join("pad.mp4"));
+    a.fast = true;
+    let r = render_report(&a).expect("ambient music must not abort the render");
+    // A steady pad has no beats: the plan falls back to a fixed 8 s grid (bpm 0).
+    assert_eq!(r.plan.bpm, 0.0);
+    assert_eq!(r.plan.switches.iter().map(|s| s.t).collect::<Vec<_>>(), [8.0, 16.0]);
+    assert!(r.pool_exhausted);
+    let distinct: std::collections::HashSet<_> = r.skipped.iter().map(|s| &s.preset).collect();
+    assert_eq!(distinct.len(), 8);
+    // Loads that were not planned switches: the opening one and each replacement
+    // of a dark preset. Stuck after the pool ran out, there would be only 8.
+    let replacements = r.loads.iter().filter(|l| l.cut.is_none()).count();
+    assert!(replacements >= 15, "only {replacements} replacement loads: presets stopped changing");
+    // One a second for 20 s, give or take the opening: not one per frame, not none.
+    assert!((18..=21).contains(&r.skipped.len()), "{} skips", r.skipped.len());
+    assert_frames(&r, wav.to_str().unwrap());
+}
+
+/// Mean RGB of the left-middle of each requested output frame (inside the
+/// solid presets' border, clear of the overlay).
+fn rgb_at(out: &Path, frames: &[u64]) -> Vec<[u32; 3]> {
     let sel: Vec<String> = frames.iter().map(|n| format!("eq(n,{n})")).collect();
     let o = Command::new("ffmpeg")
         .args(["-v", "error", "-nostdin", "-i"])
@@ -423,14 +489,21 @@ fn colours_at(out: &Path, frames: &[u64]) -> Vec<&'static str> {
     o.stdout
         .chunks(per)
         .map(|f| {
-            let (mut r, mut g, mut b) = (0u32, 0u32, 0u32);
+            let mut m = [0u32; 3];
             for px in f.chunks(3) {
-                r += px[0] as u32;
-                g += px[1] as u32;
-                b += px[2] as u32;
+                for c in 0..3 {
+                    m[c] += px[c] as u32;
+                }
             }
-            let n = (per / 3) as u32;
-            let (r, g, b) = (r / n, g / n, b / n);
+            m.map(|v| v / 8)
+        })
+        .collect()
+}
+
+fn colours_at(out: &Path, frames: &[u64]) -> Vec<&'static str> {
+    rgb_at(out, frames)
+        .into_iter()
+        .map(|[r, g, b]| {
             if r > 200 && g < 60 && b < 60 {
                 "red"
             } else if b > 200 && r < 60 && g < 60 {
@@ -467,6 +540,9 @@ fn preset_switches_land_on_their_planned_frames() {
     assert_eq!(frames, [vec![0], want_frames.clone()].concat(), "{:?}", r.loads);
     let presets: Vec<&PathBuf> = r.loads.iter().map(|l| &l.preset).collect();
     assert_eq!(presets, [&red, &blue, &red, &blue, &red]);
+    // The flag actually handed to projectM: smooth for Soft, hard for Hard and the opening.
+    let smooth: Vec<bool> = r.loads.iter().map(|l| l.smooth).collect();
+    assert_eq!(smooth, [false, true, true, true, false]);
     let cuts: Vec<Option<Cut>> = r.loads.iter().map(|l| l.cut).collect();
     assert_eq!(cuts, [None, Some(Cut::Soft), Some(Cut::Soft), Some(Cut::Soft), Some(Cut::Hard)]);
 
@@ -476,6 +552,22 @@ fn preset_switches_land_on_their_planned_frames() {
     let (s1, s2, s3, hard) = (want_frames[0], want_frames[1], want_frames[2], want_frames[3]);
     let seen = colours_at(&r.out, &[s1 - 1, s2 - 1, s3 - 1, hard - 1, hard]);
     assert_eq!(seen, ["red", "blue", "red", "blue", "red"], "frames {:?}", [s1 - 1, s2 - 1, s3 - 1, hard - 1, hard]);
+
+    // A Soft cut blends for about three seconds, through a transition effect
+    // projectM picks at random each time, so the blend's exact colours are not
+    // reproducible; that there IS a blend is. Sampling every 2nd frame of the 200
+    // after each Soft switch, some are neither red nor blue (at stride 5 one run
+    // saw as few as 2, so the bound is only that there is at least one). A switch handed
+    // to projectM without `smooth` would jump straight to the new colour.
+    for &sf in &want_frames[..3] {
+        let at: Vec<u64> = (0..100).map(|k| sf + 2 * k).collect();
+        let blended = colours_at(&r.out, &at).iter().filter(|&&c| c == "other").count();
+        assert!(blended >= 1, "only {blended} blended samples after the Soft switch at frame {sf}");
+    }
+    // A Hard cut is instant and complete: every sampled frame for 60 frames is
+    // fully the new colour. A smooth flag on it would show a blend.
+    let at: Vec<u64> = (0..20).map(|k| hard + 3 * k).collect();
+    assert!(colours_at(&r.out, &at).iter().all(|&c| c == "red"), "{:?}", colours_at(&r.out, &at));
 }
 
 #[test]
@@ -494,25 +586,98 @@ fn stems_backed_render_length_follows_the_audio_it_is_muxed_with() {
     assert_eq!(plan.total_frames, (audio_frames as f64 / 48_000.0 * FPS as f64).ceil() as u64);
 }
 
+fn abs_sample(name: &str) -> String {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("samples").join(name).to_str().unwrap().to_string()
+}
+
+fn pinned_cotc_commit() -> String {
+    projectmp4::presets::packs::sources()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.name == "presets-cream-of-the-crop")
+        .unwrap()
+        .commit
+}
+
 #[test]
-fn dump_plan_cli_writes_a_plan_with_the_chosen_settings() {
+fn dump_plan_cli_writes_a_plan_and_renders_nothing() {
     let tmp = Tmp::new();
+    let input = abs_sample("three-note-signature.m4a");
     let path = tmp.0.join("plan.json");
+    // Run in the temp dir: a render would drop <stem>.mp4 into the working directory.
     let o = Command::new(env!("CARGO_BIN_EXE_projectmp4"))
-        .args(["render", SIGNATURE, "--watermark-style", "sigil", "--static-overlay", "--fast", "--title", "T", "--dump-plan"])
+        .current_dir(&tmp.0)
+        .args(["render", &input, "--watermark-style", "sigil", "--static-overlay", "--fast", "--title", "T", "--dump-plan"])
         .arg(&path)
         .output()
         .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-    assert!(!tmp.0.join("three-note-signature.mp4").exists());
+    let mut files: Vec<String> =
+        std::fs::read_dir(&tmp.0).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    files.sort();
+    assert_eq!(files, ["plan.json"], "a plan dump must not render");
     let dumped = RenderPlan::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
 
-    let mut a = RenderArgs::new(SIGNATURE);
+    // The values asserted here are the literals typed on the command line above.
+    assert_eq!(dumped.watermark_style, projectmp4::render::MarkStyle::Sigil);
+    assert!(dumped.static_overlay);
+    assert!(dumped.fast);
+    assert_eq!(dumped.title, "T");
+    assert_eq!(dumped.packs_revision.as_deref(), Some(pinned_cotc_commit().as_str()));
+    // And the same arguments through the library give the same plan.
+    let mut a = RenderArgs::new(&input);
     a.watermark_style = projectmp4::render::MarkStyle::Sigil;
     a.static_overlay = true;
     a.fast = true;
     a.title = Some("T".into());
     assert_eq!(dumped, render_plan(&a).unwrap());
-    assert!(dumped.static_overlay && dumped.fast && dumped.title == "T");
-    assert!(dumped.packs_revision.is_some());
+    // The default is the wordmark: nothing selects the sigil unless asked.
+    assert_eq!(render_plan(&RenderArgs::new(&input)).unwrap().watermark_style, projectmp4::render::MarkStyle::Word);
+}
+
+#[test]
+fn a_plan_only_claims_a_pack_revision_when_it_used_the_packs() {
+    let mut a = RenderArgs::new(SIGNATURE);
+    assert_eq!(render_plan(&a).unwrap().packs_revision.as_deref(), Some(pinned_cotc_commit().as_str()));
+    a.presets = vec![fixture("red.milk")];
+    assert_eq!(render_plan(&a).unwrap().packs_revision, None);
+}
+
+#[test]
+fn limit_seconds_rejects_nonsense_and_a_limited_plan_describes_itself() {
+    let tmp = Tmp::new();
+    let input = abs_sample("three-note-signature.m4a");
+    for bad in ["0", "-1", "nan", "inf", "abc"] {
+        let o = Command::new(env!("CARGO_BIN_EXE_projectmp4"))
+            .current_dir(&tmp.0)
+            .arg("render")
+            .arg(&input)
+            .arg(format!("--limit-seconds={bad}"))
+            .output()
+            .unwrap();
+        assert!(!o.status.success(), "--limit-seconds={bad} was accepted");
+        assert!(String::from_utf8_lossy(&o.stderr).contains("limit-seconds"), "{bad}: {}", String::from_utf8_lossy(&o.stderr));
+    }
+    assert_eq!(std::fs::read_dir(&tmp.0).unwrap().count(), 0, "a rejected limit must not render");
+    // The library refuses too (not only the CLI parser).
+    for bad in [0.0, -3.0, f64::NAN, f64::INFINITY] {
+        let mut a = RenderArgs::new(SIGNATURE);
+        a.limit_seconds = Some(bad);
+        assert!(render_plan(&a).is_err(), "{bad}");
+    }
+
+    // A 5 s limit on a 12 s track whose only switch is at 8.46 s: the plan says
+    // 5 s, 300 frames and no switch, and records the limit.
+    let mut a = RenderArgs::new(SIGNATURE);
+    a.limit_seconds = Some(5.0);
+    let p = render_plan(&a).unwrap();
+    assert_eq!((p.duration, p.total_frames, p.limit_seconds), (5.0, 300, Some(5.0)));
+    assert!(p.switches.is_empty());
+    assert_eq!(p.preset_sequence.len(), 1);
+    assert_eq!(RenderPlan::from_json(&p.to_json()).unwrap(), p);
+    // A limit past the end changes nothing but the record of it.
+    a.limit_seconds = Some(100.0);
+    let full = render_plan(&a).unwrap();
+    assert_eq!(full.total_frames, expected_frames(SIGNATURE));
+    assert_eq!(full.switches.len(), 1);
 }
