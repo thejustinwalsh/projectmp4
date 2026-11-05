@@ -344,18 +344,27 @@ fn the_title_uses_the_embedded_oswald_not_a_system_font() {
     let diff = fonts::mean_abs_diff(&mine, &oracle);
     assert!(diff < 1e-9, "title is not being shaped with Oswald (mean |diff| {diff})");
     assert_eq!((mine.w, mine.h), (oracle.w, oracle.h), "title tile size differs from Oswald's");
+    // Golden size: production and oracle share the size/weight code, so a wrong font size
+    // would be identical on both sides and invisible above. 207x61 is Oswald Bold 34px for
+    // "Hollow Signal" plus the halo pad. If this fails after a cosmic-text bump or a change
+    // to the font files, refresh it; if neither changed, the title size has regressed.
+    assert_eq!((mine.w, mine.h), (207, 61), "golden title tile size changed");
 }
 
 #[test]
 fn positive_control_a_different_family_is_far_from_the_oswald_oracle() {
     // If this were not large, the identity test above could not tell Oswald from anything.
-    // Courier New is a macOS system face and certainly not Oswald. It also serves as the
+    // Courier New is a macOS system face and certainly not Oswald. NOTE: it is resolved
+    // from the host, so on a non-macOS machine this test fails loudly ("control family ... is
+    // not installed"): that means it needs macOS fonts, not that the code regressed.
+    // (The decoy test below reads /System/Library/Fonts/Supplemental by path, same caveat.)
+    // Measured family difference is 0.192 at Bold on both sides, so 0.10 leaves headroom. It also serves as the
     // red run for "not pinning the family".
     let oracle = fonts::oswald_only_ink("Hollow Signal");
     let other = fonts::render_in_family("Courier New", "Hollow Signal");
     assert!(fonts::ink(&other) > 500, "control drew nothing");
     let diff = fonts::mean_abs_diff(&other, &oracle);
-    assert!(diff > 0.05, "a different family is too close to Oswald: {diff}");
+    assert!(diff > 0.10, "a different family is too close to Oswald: {diff}");
 }
 
 #[test]
@@ -424,8 +433,10 @@ fn overlay_draws_the_oswald_title_pixel_for_pixel() {
 
 #[test]
 fn the_artist_line_is_oswald_regular_below_the_title() {
-    // Artist shapes at Weight::NORMAL through the same path. Matching the oracle pins the face
-    // and weight (a Bold or non-Oswald artist differs); the extra height proves a second line.
+    // Artist shapes at Weight::NORMAL through the same path. Matching the oracle pins that the
+    // artist is drawn in Oswald at the weight the oracle also uses (a non-Oswald artist differs).
+    // It does NOT pin Weight::NORMAL itself: that is hardcoded in the shared render_text_with,
+    // so production and oracle agree on it by construction. The extra height proves a second line.
     let mine = fonts::render_title_artist_ink("Hollow Signal", "GH0STF1R3");
     let oracle = fonts::oswald_only_ink_with("Hollow Signal", Some("GH0STF1R3"));
     let title_only = fonts::oswald_only_ink("Hollow Signal");

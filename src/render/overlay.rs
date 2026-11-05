@@ -26,7 +26,8 @@ pub const MAX_MARK_SCALE: f32 = 1.2;
 /// Two facts make the title identical across machines, both established by
 /// experiment (a host face registered under the family name "Oswald"):
 /// 1. the face is requested by *name* (`Family::Name`), never a generic family
-///    such as `SansSerif`, whose resolution depends on the host; and
+///    such as `SansSerif`, which resolved to different pixels than Oswald on the one host
+///    measured (not verified on others); and
 /// 2. the embedded faces are inserted into the database *before* the host's, because
 ///    when two faces share a family and weight, the first one inserted wins. (cosmic-text's
 ///    own `new_with_fonts` loads system fonts first, so a host-installed Oswald
