@@ -70,18 +70,33 @@ pub fn bass_per_frame(d: &Driver, fps: u32, frames: u64) -> Vec<f32> {
     sorted.sort_by(|a, b| a.total_cmp(b));
     let reference = sorted.get(sorted.len() * 95 / 100).copied().unwrap_or(0.0);
     let mut out = Vec::with_capacity(frames as usize);
-    let mut level = 0.0f32;
     for n in 0..frames {
         let lo = ((n as f64 / fps as f64) / hop_s) as usize;
         let hi = (((n + 1) as f64 / fps as f64) / hop_s).ceil() as usize;
         let hi = hi.min(env.len()).max(lo + 1).min(env.len());
         let lo = lo.min(hi.saturating_sub(1));
         let e = if env.is_empty() { 0.0 } else { env[lo..hi].iter().sum::<f64>() / (hi - lo) as f64 };
-        let raw = if reference > 0.0 { (e / reference).sqrt().min(1.0) as f32 } else { 0.0 };
-        level = raw.max(level * 0.9);
-        out.push(level);
+        out.push(if reference > 0.0 { (e / reference).sqrt().min(1.0) as f32 } else { 0.0 });
     }
-    out
+    smooth_bass(&out, fps)
+}
+
+/// Release per 1/60 s: the watermark falls to 0.9 of its level each 60 Hz tick.
+const RELEASE_PER_60TH: f32 = 0.9;
+
+/// Instant attack, exponential release with a fixed time constant *in seconds*
+/// (the per-frame factor is `0.9^(60/fps)`), so the pulse looks the same at 10,
+/// 60 and 240 fps. A per-frame constant would be 6x slower at 10 fps and 4x
+/// twitchier at 240.
+pub fn smooth_bass(raw: &[f32], fps: u32) -> Vec<f32> {
+    let release = RELEASE_PER_60TH.powf(60.0 / fps as f32);
+    let mut level = 0.0f32;
+    raw.iter()
+        .map(|&r| {
+            level = r.max(level * release);
+            level
+        })
+        .collect()
 }
 
 fn is_black(rgba: &[u8]) -> bool {
@@ -404,6 +419,22 @@ mod tests {
         let mut w = BlackWatch::new(FPS);
         assert_eq!(dead_at(&mut w, std::iter::repeat(0.5).take(6000)), Some(59), "the 60th black frame, not the 59th or 61st");
         assert_eq!(w.max_run, 60);
+    }
+
+    #[test]
+    fn the_watermark_release_takes_the_same_time_at_every_frame_rate() {
+        // A full-scale hit then silence: half a second later (frame fps/2) the level
+        // is 0.9^30 whatever the frame rate, and the release is monotone.
+        let want = 0.9f32.powi(30);
+        for fps in [10u32, 24, 60, 120, 240] {
+            let mut raw = vec![0.0f32; fps as usize];
+            raw[0] = 1.0;
+            let out = smooth_bass(&raw, fps);
+            assert_eq!(out[0], 1.0, "attack is instant at {fps} fps");
+            let got = out[fps as usize / 2];
+            assert!((got - want).abs() < 1e-3, "{fps} fps: level after 0.5 s is {got}, want {want}");
+            assert!(out.windows(2).all(|w| w[1] <= w[0]), "{fps} fps: not monotone");
+        }
     }
 
     #[test]

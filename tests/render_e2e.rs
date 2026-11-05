@@ -805,3 +805,11 @@ fn an_unusable_frame_rate_is_rejected_not_looped_on() {
     a.fps = 10;
     assert_eq!(render_plan(&a).unwrap().fps, 10);
 }
+
+#[test]
+fn help_warns_that_preset_motion_depends_on_the_frame_rate() {
+    let o = Command::new(env!("CARGO_BIN_EXE_projectmp4")).args(["render", "--help"]).output().unwrap();
+    let help = String::from_utf8_lossy(&o.stdout).replace('\n', " ");
+    let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(help.contains("once per frame") && help.contains("slower at 10 fps") && help.contains("faster at 240"), "{help}");
+}

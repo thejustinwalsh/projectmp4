@@ -76,7 +76,11 @@ pub fn analyse_with_cache_dir(src: &Source, models: &Path, cache_dir: &Path) -> 
 fn read_cache(path: &Path) -> Option<Analysis> {
     let bytes = std::fs::read(path).ok()?;
     let v: Value = serde_json::from_slice(&bytes).ok()?;
-    parse(&v, true)
+    let (a, note) = parse_cache(&v)?;
+    if let Some(n) = note {
+        eprintln!("render: beat analysis: {n}");
+    }
+    Some(a)
 }
 
 fn compute(src: &Source, models: &Path) -> Result<Outcome> {
@@ -88,7 +92,7 @@ fn compute(src: &Source, models: &Path) -> Result<Outcome> {
             models.display()
         ))
     })?;
-    match interpret(&v) {
+    match interpret(&v, Some(src.duration)) {
         Interpreted::Usable(a, notes) => {
             for n in notes {
                 eprintln!("render: beat analysis: {n}");
@@ -110,30 +114,82 @@ enum Interpreted {
 /// Beats per bar assumed when downbeats must be inferred from beats.
 const BEATS_PER_BAR: usize = 4;
 
-/// Reads a fresh `analyze` result leniently. Timestamps at or past the end of
-/// the track (a final downbeat a few ms over is normal) are dropped, order and
-/// duplicates are repaired, a missing bpm becomes the median beat gap or 0
-/// (unknown), and missing downbeats become every 4th beat.
-fn interpret(v: &Value) -> Interpreted {
+/// Seconds by which the analyser's duration may differ from the track's before
+/// its schedule is not trusted: the beats would be cut off or stretched.
+const DURATION_TOLERANCE: f64 = 1.0;
+
+/// One timestamp array of an analyser result, cleaned and accounted for.
+struct Cleaned {
+    t: Vec<f64>,
+    present: bool,
+    /// Entries that were not finite numbers.
+    garbage: usize,
+    notes: Vec<String>,
+    /// Timestamps dropped for lying outside `0..duration`.
+    out_of_range: usize,
+}
+
+fn clean(v: &Value, key: &str, duration: f64) -> Cleaned {
+    let arr = v.get(key).and_then(Value::as_array);
+    let mut c = Cleaned { t: Vec::new(), present: arr.is_some(), garbage: 0, notes: Vec::new(), out_of_range: 0 };
+    for x in arr.into_iter().flatten() {
+        match x.as_f64().filter(|f| f.is_finite()) {
+            Some(f) => c.t.push(f),
+            None => c.garbage += 1,
+        }
+    }
+    if c.garbage > 0 {
+        c.notes.push(format!("{key}: {} entries were not numbers and were ignored", c.garbage));
+    }
+    let before = c.t.len();
+    c.t.retain(|x| *x >= 0.0 && *x < duration);
+    c.out_of_range = before - c.t.len();
+    if c.out_of_range > 0 {
+        c.notes.push(format!("{key}: {} timestamps outside the {duration:.1} s track were dropped", c.out_of_range));
+    }
+    if c.t.windows(2).any(|w| w[1] < w[0]) {
+        c.notes.push(format!("{key}: out of order, sorted"));
+    }
+    c.t.sort_by(|a, b| a.total_cmp(b));
+    let n = c.t.len();
+    c.t.dedup();
+    if c.t.len() < n {
+        c.notes.push(format!("{key}: {} duplicate timestamps removed", n - c.t.len()));
+    }
+    c
+}
+
+/// Reads a fresh `analyze` result leniently, and says what it had to repair.
+/// Timestamps at or past the end of the track (a final downbeat a few ms over
+/// is normal) are dropped, order and duplicates repaired, a missing bpm becomes
+/// the median beat gap or 0 (unknown), and missing downbeats become every 4th
+/// beat. `reference` is the track's own duration: an analyser that reports a
+/// different one (over `DURATION_TOLERANCE`) has analysed the wrong span, and
+/// its schedule is not used.
+fn interpret(v: &Value, reference: Option<f64>) -> Interpreted {
     let Some(duration) = v.get("duration").and_then(Value::as_f64).filter(|d| d.is_finite() && *d > 0.0) else {
         return Interpreted::Beatless("the analyser's result has no usable duration, so it could not be read".into());
     };
-    let clean = |key: &str| -> Vec<f64> {
-        let mut t: Vec<f64> = v
-            .get(key)
-            .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_f64).collect())
-            .unwrap_or_default();
-        t.retain(|x| x.is_finite() && *x >= 0.0 && *x < duration);
-        t.sort_by(|a, b| a.total_cmp(b));
-        t.dedup();
-        t
-    };
-    let (beats, mut downbeats) = (clean("beats"), clean("downbeats"));
-    if beats.is_empty() && downbeats.is_empty() {
-        return Interpreted::Beatless("the analyser found no beats in this track".into());
+    if let Some(r) = reference.filter(|r| (duration - r).abs() > DURATION_TOLERANCE) {
+        return Interpreted::Beatless(format!(
+            "the analyser reported a duration of {duration:.1} s for a {r:.1} s track, so its beats would cover the wrong span; not used"
+        ));
     }
-    let mut notes = Vec::new();
+    let (b, d) = (clean(v, "beats", duration), clean(v, "downbeats", duration));
+    let mut notes: Vec<String> = b.notes.iter().chain(&d.notes).cloned().collect();
+    let (beats, mut downbeats) = (b.t, d.t);
+    if beats.is_empty() && downbeats.is_empty() {
+        let garbage = b.garbage + d.garbage;
+        return Interpreted::Beatless(if garbage > 0 {
+            format!("the analyser's beats could not be read: {garbage} entries were not numbers")
+        } else if !b.present && !d.present {
+            "the analyser's result has neither beats nor downbeats, so it could not be read".into()
+        } else if b.out_of_range + d.out_of_range > 0 {
+            format!("every beat the analyser reported lies outside the {duration:.1} s track")
+        } else {
+            "the analyser found no beats in this track".into()
+        });
+    }
     if downbeats.is_empty() {
         notes.push(format!(
             "{} beats but no downbeats; taking every {BEATS_PER_BAR}th beat as a downbeat",
@@ -160,24 +216,26 @@ fn times(v: &Value, key: &str) -> Option<Vec<f64>> {
     out.filter(|t| t.iter().all(|x| x.is_finite()))
 }
 
-/// One parser for both the cache entry and a fresh `analyze` result.
-fn parse(v: &Value, from_cache: bool) -> Option<Analysis> {
-    if !from_cache {
-        return match interpret(v) {
-            Interpreted::Usable(a, _) => Some(a),
-            Interpreted::Beatless(_) => None,
-        };
-    }
-    let beats = times(v, "beats")?;
-    let downbeats = times(v, "downbeats")?;
+/// A cache entry: the same analyser wrote it, so a final timestamp a few ms past
+/// the end is dropped like in a fresh result (rejecting it would force a slow
+/// re-analysis on every run). What still marks an entry as stale or corrupt, and
+/// is a miss: a non-numeric or non-finite timestamp, timestamps out of order or
+/// repeated, a missing or non-positive duration or bpm, nothing left after
+/// dropping, or a negative timestamp.
+fn parse_cache(v: &Value) -> Option<(Analysis, Option<String>)> {
+    let mut beats = times(v, "beats")?;
+    let mut downbeats = times(v, "downbeats")?;
     let duration = v.get("duration")?.as_f64().filter(|d| *d > 0.0)?;
-    if beats.is_empty() || downbeats.is_empty() {
+    // Order and repeats are checked first, on exactly what was stored.
+    let ascending = |t: &[f64]| t.windows(2).all(|w| w[1] > w[0]);
+    if !ascending(&beats) || !ascending(&downbeats) || beats.iter().chain(&downbeats).any(|t| *t < 0.0) {
         return None;
     }
-    // Consumers (preset switching) rely on a strictly ascending grid that
-    // lies inside the track.
-    let ascending = |t: &[f64]| t.windows(2).all(|w| w[1] > w[0]);
-    if !ascending(&beats) || !ascending(&downbeats) || downbeats.iter().any(|d| *d >= duration) {
+    let n = beats.len() + downbeats.len();
+    beats.retain(|t| *t < duration);
+    downbeats.retain(|t| *t < duration);
+    let dropped = n - beats.len() - downbeats.len();
+    if beats.is_empty() || downbeats.is_empty() {
         return None;
     }
     let mut bpm = v.get("bpm")?.as_f64()? as f32;
@@ -192,7 +250,20 @@ fn parse(v: &Value, from_cache: bool) -> Option<Analysis> {
         }
         bpm = (60.0 / median) as f32;
     }
-    Some(Analysis { bpm, beats, downbeats, duration, from_cache })
+    let note = (dropped > 0).then(|| format!("cached analysis: {dropped} timestamps at or past the end of the track dropped"));
+    Some((Analysis { bpm, beats, downbeats, duration, from_cache: true }, note))
+}
+
+#[cfg(test)]
+/// Test seam: `from_cache` picks the cache or the fresh reading.
+fn parse(v: &Value, from_cache: bool) -> Option<Analysis> {
+    if from_cache {
+        return parse_cache(v).map(|(a, _)| a);
+    }
+    match interpret(v, None) {
+        Interpreted::Usable(a, _) => Some(a),
+        Interpreted::Beatless(_) => None,
+    }
 }
 
 #[cfg(test)]
@@ -226,7 +297,7 @@ mod tests {
     // --- what a fresh analyser result means: it never becomes an error ---
 
     fn usable(v: &Value) -> (Analysis, Vec<String>) {
-        match interpret(v) {
+        match interpret(v, None) {
             Interpreted::Usable(a, n) => (a, n),
             Interpreted::Beatless(w) => panic!("expected a usable analysis, got beatless: {w}"),
         }
@@ -238,8 +309,19 @@ mod tests {
         let (a, _) = usable(&v);
         assert_eq!(a.downbeats, vec![0.5, 2.5]);
         assert_eq!(a.beats, vec![0.5, 1.0, 1.5]);
-        // A cache entry with the same timestamps is still a miss: there it means corruption.
-        assert!(parse(&v, true).is_none());
+        // The same applies to a cache entry written by that analyser: dropped, not a miss.
+        let c = parse(&v, true).expect("a cached final downbeat past the end must not force a re-analysis");
+        assert_eq!(c.downbeats, vec![0.5, 2.5]);
+        // What does mark a cache entry as bad: repeats, disorder, negatives, nothing left.
+        for bad in [
+            json!({"bpm": 120.0, "beats": [0.5, 0.5, 1.0], "downbeats": [0.5], "duration": 10.0}),
+            json!({"bpm": 120.0, "beats": [1.0, 0.5], "downbeats": [0.5], "duration": 10.0}),
+            json!({"bpm": 120.0, "beats": [-0.5, 1.0], "downbeats": [1.0], "duration": 10.0}),
+            json!({"bpm": 120.0, "beats": [10.5], "downbeats": [10.5], "duration": 10.0}),
+            json!({"bpm": 120.0, "beats": ["x", 1.0], "downbeats": [1.0], "duration": 10.0}),
+        ] {
+            assert!(parse(&bad, true).is_none(), "{bad}");
+        }
     }
 
     #[test]
@@ -268,24 +350,51 @@ mod tests {
         assert_eq!((a.bpm, a.downbeats), (0.0, vec![3.0]));
     }
 
+    fn why(v: &Value, reference: Option<f64>) -> String {
+        match interpret(v, reference) {
+            Interpreted::Beatless(w) => w,
+            other => panic!("expected a fallback, got {other:?}"),
+        }
+    }
+
     #[test]
-    fn only_a_track_with_nothing_to_schedule_from_is_beatless_and_it_says_why() {
-        for v in [
-            json!({"bpm": 0.0, "beats": [], "downbeats": [], "duration": 10.0}),
-            // Everything the analyser reported lies at or past the end.
-            json!({"bpm": 0.0, "beats": [10.0, 11.0], "downbeats": [10.5], "duration": 10.0}),
-        ] {
-            match interpret(&v) {
-                Interpreted::Beatless(w) => assert!(w.contains("no beats"), "{w}"),
-                other => panic!("{other:?}"),
-            }
+    fn each_kind_of_nothing_says_what_actually_happened() {
+        let empty = json!({"bpm": 0.0, "beats": [], "downbeats": [], "duration": 10.0});
+        assert!(why(&empty, None).contains("found no beats"));
+        let past = json!({"bpm": 0.0, "beats": [10.0, 11.0], "downbeats": [10.5], "duration": 10.0});
+        assert!(why(&past, None).contains("lies outside"), "{}", why(&past, None));
+        // Strings are garbage, not an absence of beats.
+        let strings = json!({"bpm": 0.0, "beats": ["1.0", "2.0"], "downbeats": ["1.0"], "duration": 10.0});
+        let w = why(&strings, None);
+        assert!(w.contains("could not be read") && w.contains("3 entries") && !w.contains("no beats"), "{w}");
+        // Neither field at all, no duration, a non-object.
+        for v in [json!({"duration": 10.0}), json!({"beats": [1.0]}), json!({"beats": [1.0], "duration": -3.0}), json!("nonsense")] {
+            let w = why(&v, None);
+            assert!(w.contains("could not be read") && !w.contains("no beats"), "{v}: {w}");
         }
-        // Output that cannot be read degrades too, and does not claim there were no beats.
-        for v in [json!({"beats": [1.0]}), json!({"beats": [1.0], "duration": -3.0}), json!("nonsense")] {
-            match interpret(&v) {
-                Interpreted::Beatless(w) => assert!(w.contains("could not be read") && !w.contains("no beats"), "{w}"),
-                other => panic!("{other:?}"),
-            }
+    }
+
+    #[test]
+    fn repairs_are_reported() {
+        let v = json!({"bpm": 120.0,
+            "beats": [1.0, 0.5, 0.5, 1.5, 12.0, "x"],
+            "downbeats": [0.5, 10.2], "duration": 10.0});
+        let (a, notes) = usable(&v);
+        assert_eq!(a.beats, vec![0.5, 1.0, 1.5]);
+        let all = notes.join(" | ");
+        for needle in ["beats: 1 entries were not numbers", "beats: 1 timestamps outside", "beats: out of order, sorted", "beats: 1 duplicate", "downbeats: 1 timestamps outside"] {
+            assert!(all.contains(needle), "missing {needle:?} in {all}");
         }
+    }
+
+    #[test]
+    fn an_analyser_that_measured_the_wrong_span_is_not_trusted() {
+        // 30 s of beats for a 240 s track would switch for 30 s and then sit still.
+        let v = json!({"bpm": 120.0, "beats": [1.0, 2.0, 3.0], "downbeats": [1.0], "duration": 30.0});
+        let w = why(&v, Some(240.0));
+        assert!(w.contains("30.0 s") && w.contains("240.0 s") && w.contains("wrong span"), "{w}");
+        // Within a second is the container-vs-decoded difference and is fine.
+        assert!(matches!(interpret(&v, Some(30.9)), Interpreted::Usable(..)));
+        assert!(matches!(interpret(&v, Some(31.1)), Interpreted::Beatless(_)));
     }
 }

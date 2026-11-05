@@ -51,6 +51,9 @@ struct RenderCmd {
     /// Use this .milk file instead of the profile's list; repeatable.
     #[arg(long)]
     preset: Vec<PathBuf>,
+    /// Frames per second, 10 to 240. MilkDrop presets step their equations once per
+    /// frame and were authored for about 60 fps, so motion runs roughly 6x slower at
+    /// 10 fps and roughly 4x faster at 240 (direction and rough size, not measured).
     #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(10..=240))]
     fps: u32,
     /// Audio that drives the visuals: stems (falls back to mix) or mix.
