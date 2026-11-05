@@ -1,0 +1,12 @@
+[preset00]
+fDecay=0
+nWaveMode=0
+fWaveAlpha=0
+ob_size=0.5
+ob_r=1
+ob_g=0
+ob_b=0
+ob_a=1
+ib_size=0
+mv_a=0
+per_frame_1=wave_a = 0;

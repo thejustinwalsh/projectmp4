@@ -28,9 +28,23 @@ pub struct RenderReport {
     /// `plan.preset_sequence` exactly when a preset was skipped.
     pub played: Vec<PathBuf>,
     pub skipped: Vec<Skipped>,
-    /// Longest run of consecutive all-black frames, before the overlay is drawn.
+    /// Every preset that took effect and the frame it first drew on. `cut` is
+    /// `None` for the opening preset and for replacements of a dead preset.
+    pub loads: Vec<LoadEvent>,
+    /// True when every candidate had been skipped and the render carried on
+    /// with whatever was on screen.
+    pub pool_exhausted: bool,
+    /// Longest run of consecutive all-black frames over audible music, before
+    /// the overlay is drawn.
     pub max_black_run: u32,
     pub frames: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadEvent {
+    pub frame: u64,
+    pub preset: PathBuf,
+    pub cut: Option<Cut>,
 }
 
 pub fn render(args: &RenderArgs) -> Result<PathBuf> {
@@ -80,13 +94,16 @@ fn flip_rows(px: &mut [u8], w: usize, h: usize) {
 }
 
 /// Walks the preset pool. A load that projectM rejects, or a preset that
-/// renders black for over a second, is skipped for the next in the pool and
-/// never tried again this render: a bad preset is bad every time.
+/// renders black for over a second of audible music, is skipped for the next
+/// in the pool and never tried again this render: a bad preset is bad every
+/// time. Running out of candidates is not an error once something is on
+/// screen: the render keeps the current preset and says so.
 struct Playlist<'a> {
     pool: &'a [PathBuf],
     cursor: usize,
     played: Vec<PathBuf>,
     skipped: Vec<Skipped>,
+    exhausted: bool,
 }
 
 impl Playlist<'_> {
@@ -94,8 +111,9 @@ impl Playlist<'_> {
         self.skipped.iter().any(|s| s.preset == p)
     }
 
-    /// Loads the next usable preset; Err when every candidate has been skipped.
-    fn advance(&mut self, pm: &crate::ffi::Instance<'_>, smooth: bool) -> Result<()> {
+    /// Loads the next usable preset. `Ok(false)`: every candidate has been
+    /// skipped, and whatever was on screen stays there.
+    fn advance(&mut self, pm: &crate::ffi::Instance<'_>, smooth: bool) -> Result<bool> {
         for _ in 0..self.pool.len() {
             let p = self.pool[self.cursor % self.pool.len()].clone();
             self.cursor += 1;
@@ -105,7 +123,7 @@ impl Playlist<'_> {
             match pm.load_preset_file(&p, smooth) {
                 Ok(()) => {
                     self.played.push(p);
-                    return Ok(());
+                    return Ok(true);
                 }
                 Err(e) => {
                     eprintln!("render: skipping {}: {e}", p.display());
@@ -113,16 +131,35 @@ impl Playlist<'_> {
                 }
             }
         }
-        Err(Error::msg(format!("none of the {} candidate presets could be used", self.pool.len())))
+        self.exhausted = true;
+        Ok(false)
     }
 
-    /// The current preset rendered black: move it from played to skipped.
-    fn reject_current(&mut self, reason: &str) {
-        if let Some(p) = self.played.pop() {
-            eprintln!("render: skipping {}: {reason}", p.display());
-            self.skipped.push(Skipped { preset: p, reason: reason.into() });
+    /// The current preset drew nothing for a second of music: replace it. If
+    /// nothing else loads, it stays (a black picture beats an aborted render).
+    fn replace_current(&mut self, pm: &crate::ffi::Instance<'_>, reason: &str) -> Result<()> {
+        let Some(cur) = self.played.pop() else { return Ok(()) };
+        eprintln!("render: skipping {}: {reason}", cur.display());
+        self.skipped.push(Skipped { preset: cur.clone(), reason: reason.into() });
+        if !self.advance(pm, false)? {
+            // Nothing else is usable: un-skip the one on screen.
+            self.skipped.retain(|s| s.preset != cur);
+            self.played.push(cur);
         }
+        Ok(())
     }
+}
+
+/// Peak below this (about -60 dBFS) is silence: black is the right picture.
+pub const AUDIBLE_PEAK: f32 = 1e-3;
+
+fn audible(window: &[f32]) -> bool {
+    window.iter().any(|s| s.abs() > AUDIBLE_PEAK)
+}
+
+/// First frame at or after each switch time.
+pub fn switch_frames(plan: &RenderPlan) -> Vec<u64> {
+    plan.switches.iter().map(|s| (s.t * plan.fps as f64 - 1e-9).ceil().max(0.0) as u64).collect()
 }
 
 fn run(args: &RenderArgs, prep: &Prepared) -> Result<RenderReport> {
@@ -130,7 +167,7 @@ fn run(args: &RenderArgs, prep: &Prepared) -> Result<RenderReport> {
     let fps = plan.fps;
     let out = args.out_path();
 
-    let overlay = Overlay::new(&plan.title, plan.artist.as_deref(), plan.art.as_deref(), args.watermark_style, !args.static_overlay)?;
+    let overlay = Overlay::new(&plan.title, plan.artist.as_deref(), plan.art.as_deref(), plan.watermark_style, !plan.static_overlay)?;
     let bass = bass_per_frame(&prep.driver, fps, plan.total_frames);
 
     // `Instance` borrows the context, so the two are separate locals.
@@ -143,30 +180,41 @@ fn run(args: &RenderArgs, prep: &Prepared) -> Result<RenderReport> {
         pm.set_texture_search_paths(&[t.as_path()])?;
     }
 
-    let mut enc = Encoder::start(&out, &prep.wav, WIDTH, HEIGHT, fps, args.fast)?;
-    let mut list = Playlist { pool: &plan.pool, cursor: 0, played: Vec::new(), skipped: Vec::new() };
-    // The first frame at or after each switch time.
-    let switch_frames: Vec<u64> =
-        plan.switches.iter().map(|s| (s.t * fps as f64 - 1e-9).ceil().max(0.0) as u64).collect();
+    let mut enc = Encoder::start(&out, &prep.wav, WIDTH, HEIGHT, fps, plan.fast)?;
+    let mut list = Playlist { pool: &plan.pool, cursor: 0, played: Vec::new(), skipped: Vec::new(), exhausted: false };
+    let mut loads: Vec<LoadEvent> = Vec::new();
+    let switch_at = switch_frames(plan);
     let mut next_switch = 0usize;
-    // The opening preset sits at the plan's cursor 0; the loop below loads it on frame 0.
-    list.advance(&pm, false)?;
+    // The opening preset is segment 0; with nothing loadable there is nothing to draw.
+    if !list.advance(&pm, false)? {
+        return Err(Error::msg(format!("none of the {} candidate presets could be loaded", plan.pool.len())));
+    }
+    loads.push(LoadEvent { frame: 0, preset: list.played.last().cloned().unwrap_or_default(), cut: None });
 
     let rate = prep.driver.rate as f64;
     let (w, h) = (WIDTH as usize, HEIGHT as usize);
     let (mut black_run, mut max_black_run) = (0u32, 0u32);
+    let mut last_heard: Option<u64> = None;
     for n in 0..plan.total_frames {
-        while next_switch < switch_frames.len() && switch_frames[next_switch] <= n {
-            // The plan's first segment is the opening preset, already loaded.
-            let smooth = plan.switches[next_switch].cut == Cut::Soft;
-            list.advance(&pm, smooth)?;
+        while next_switch < switch_at.len() && switch_at[next_switch] <= n {
+            let cut = plan.switches[next_switch].cut;
+            if list.advance(&pm, cut == Cut::Soft)? {
+                loads.push(LoadEvent { frame: n, preset: list.played.last().cloned().unwrap_or_default(), cut: Some(cut) });
+            }
             next_switch += 1;
             black_run = 0;
         }
         // Audio for this frame; the half-sample keeps the f64 -> index cast from truncating down.
         let first = (n as f64 * rate / fps as f64).round();
         let last = ((n + 1) as f64 * rate / fps as f64).round();
-        pm.pcm_add_float(prep.driver.window((first + 0.5) / rate, (last - first) as usize), Channels::Stereo);
+        let window = prep.driver.window((first + 0.5) / rate, (last - first) as usize);
+        // Music decays between hits, so a quiet frame is only "silence" once
+        // nothing has been audible for half a second.
+        if audible(window) {
+            last_heard = Some(n);
+        }
+        let heard = last_heard.is_some_and(|l| n - l < (fps as u64 / 2).max(1));
+        pm.pcm_add_float(window, Channels::Stereo);
         pm.set_frame_time(n as f64 / fps as f64);
 
         let mut px;
@@ -177,14 +225,22 @@ fn run(args: &RenderArgs, prep: &Prepared) -> Result<RenderReport> {
                 black_run = 0;
                 break;
             }
-            black_run += 1;
-            max_black_run = max_black_run.max(black_run);
-            // More than a second of black: a MilkDrop fade is shorter, a dead preset is not.
-            if black_run <= fps {
+            // Black in silence is correct output; only black over music is a dead preset.
+            if !heard {
+                black_run = 0;
                 break;
             }
-            list.reject_current("rendered black for over a second");
-            list.advance(&pm, false)?;
+            black_run += 1;
+            max_black_run = max_black_run.max(black_run);
+            // A full second of it: a MilkDrop fade is shorter, a dead preset is not.
+            if black_run < fps || list.exhausted {
+                break;
+            }
+            list.replace_current(&pm, "rendered black for a second of music")?;
+            if list.exhausted {
+                break;
+            }
+            loads.push(LoadEvent { frame: n, preset: list.played.last().cloned().unwrap_or_default(), cut: None });
             black_run = 0;
         }
 
@@ -201,6 +257,8 @@ fn run(args: &RenderArgs, prep: &Prepared) -> Result<RenderReport> {
         plan: plan.clone(),
         played: list.played,
         skipped: list.skipped,
+        loads,
+        pool_exhausted: list.exhausted,
         max_black_run,
         frames: plan.total_frames,
     })
@@ -209,6 +267,18 @@ fn run(args: &RenderArgs, prep: &Prepared) -> Result<RenderReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flip_rows_handles_even_and_odd_heights() {
+        for (w, h) in [(3usize, 3usize), (3, 4), (2, 2), (1, 1), (4, 6)] {
+            let mut px: Vec<u8> = (0..w * h * 4).map(|i| (i % 251) as u8).collect();
+            let orig = px.clone();
+            flip_rows(&mut px, w, h);
+            for y in 0..h {
+                assert_eq!(px[y * w * 4..(y + 1) * w * 4], orig[(h - 1 - y) * w * 4..(h - y) * w * 4], "{w}x{h} row {y}");
+            }
+        }
+    }
 
     #[test]
     fn flip_rows_reverses_row_order_and_keeps_pixels_intact() {

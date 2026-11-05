@@ -44,6 +44,8 @@ pub struct RenderArgs {
     pub models: PathBuf,
     /// Print progress to stderr.
     pub progress: bool,
+    /// Render only the first N seconds (a trial run). `total_frames` reflects it.
+    pub limit_seconds: Option<f64>,
 }
 
 impl RenderArgs {
@@ -63,6 +65,7 @@ impl RenderArgs {
             out: None,
             models: PathBuf::from(DEFAULT_MODELS),
             progress: false,
+            limit_seconds: None,
         }
     }
 
@@ -87,6 +90,12 @@ pub struct RenderPlan {
     pub total_frames: u64,
     pub bpm: f32,
     pub driver: DriverKind,
+    /// Overlay and encode settings, recorded so a dumped plan replays as it was previewed.
+    pub watermark_style: MarkStyle,
+    pub static_overlay: bool,
+    pub fast: bool,
+    /// Pinned commit of the preset pack the pool was resolved against.
+    pub packs_revision: Option<String>,
     pub switches: Vec<SwitchPoint>,
     /// The preset for each segment: the opening one, then one per switch.
     pub preset_sequence: Vec<PathBuf>,
@@ -110,6 +119,10 @@ impl RenderPlan {
             "total_frames": self.total_frames,
             "bpm": self.bpm,
             "driver": match self.driver { DriverKind::Stems => "stems", DriverKind::Mix => "mix" },
+            "watermark_style": match self.watermark_style { MarkStyle::Word => "word", MarkStyle::Sigil => "sigil" },
+            "static_overlay": self.static_overlay,
+            "fast": self.fast,
+            "packs_revision": self.packs_revision,
             "switches": self.switches.iter().map(|s| json!({
                 "t": s.t,
                 "cut": match s.cut { Cut::Hard => "hard", Cut::Soft => "soft" },
@@ -167,6 +180,14 @@ impl RenderPlan {
                 Some("mix") => DriverKind::Mix,
                 _ => return Err(bad("driver")),
             },
+            watermark_style: match str_of("watermark_style").as_deref() {
+                Some("word") => MarkStyle::Word,
+                Some("sigil") => MarkStyle::Sigil,
+                _ => return Err(bad("watermark_style")),
+            },
+            static_overlay: v.get("static_overlay").and_then(Value::as_bool).ok_or_else(|| bad("static_overlay"))?,
+            fast: v.get("fast").and_then(Value::as_bool).ok_or_else(|| bad("fast"))?,
+            packs_revision: opt_str("packs_revision")?,
             switches,
             preset_sequence: paths("preset_sequence")?,
             pool: paths("pool")?,
@@ -233,9 +254,14 @@ pub(crate) fn prepare(args: &RenderArgs) -> Result<Prepared> {
     let preset_sequence: Vec<PathBuf> =
         (0..=switches.len()).map(|i| pool[i % pool.len()].clone()).collect();
 
-    let duration = driver.frames() as f64 / driver.rate as f64;
+    // The audio the encoder muxes (and `-shortest` trims to) is the normalised
+    // WAV, so its length, not the stems', sets the video length. Stems can be
+    // shorter (ravezilla: 8,277,120 vs 8,277,768 frames) or, in principle,
+    // longer; the driver reads zeros past its end.
+    let duration = wav_frames(&src.wav)? as f64 / driver.rate as f64;
     // The tiny subtraction keeps an exact multiple (12.0 s * 60) from rounding up a frame.
-    let total_frames = (duration * args.fps as f64 - 1e-9).ceil().max(1.0) as u64;
+    let shown = args.limit_seconds.filter(|l| *l > 0.0).map_or(duration, |l| l.min(duration));
+    let total_frames = (shown * args.fps as f64 - 1e-9).ceil().max(1.0) as u64;
     let plan = RenderPlan {
         input: args.input.clone(),
         title,
@@ -246,6 +272,13 @@ pub(crate) fn prepare(args: &RenderArgs) -> Result<Prepared> {
         total_frames,
         bpm: analysis.bpm,
         driver: driver.kind,
+        watermark_style: args.watermark_style,
+        static_overlay: args.static_overlay,
+        fast: args.fast,
+        packs_revision: crate::presets::packs::sources()
+            .ok()
+            .and_then(|v| v.into_iter().find(|s| s.name == "presets-cream-of-the-crop"))
+            .map(|s| s.commit),
         switches,
         preset_sequence,
         pool,
@@ -278,4 +311,29 @@ fn resolve_pool(args: &RenderArgs) -> Result<(Vec<PathBuf>, Option<PathBuf>)> {
     }
     let pool = profile.presets.iter().map(|p| packs.cotc.join(p)).collect();
     Ok((pool, Some(packs.textures)))
+}
+
+/// Stereo frames in a canonical 48 kHz f32 stereo WAV, from its `data` chunk size.
+fn wav_frames(path: &std::path::Path) -> Result<u64> {
+    use std::io::{Read, Seek, SeekFrom};
+    let err = |e: std::io::Error| Error::msg(format!("read {}: {e}", path.display()));
+    let mut f = std::fs::File::open(path).map_err(err)?;
+    let mut head = [0u8; 12];
+    f.read_exact(&mut head).map_err(err)?;
+    if &head[..4] != b"RIFF" || &head[8..] != b"WAVE" {
+        return Err(Error::msg(format!("{} is not a WAV file", path.display())));
+    }
+    loop {
+        let mut ch = [0u8; 8];
+        f.read_exact(&mut ch).map_err(err)?;
+        let size = u32::from_le_bytes([ch[4], ch[5], ch[6], ch[7]]) as u64;
+        if &ch[..4] == b"data" {
+            // ffmpeg streaming writes may leave 0xFFFFFFFF; fall back to the file length.
+            let len = f.metadata().map_err(err)?.len();
+            let pos = f.stream_position().map_err(err)?;
+            let bytes = if size == 0xFFFF_FFFF || pos + size > len { len - pos } else { size };
+            return Ok(bytes / 8);
+        }
+        f.seek(SeekFrom::Current(((size + 1) & !1) as i64)).map_err(err)?;
+    }
 }

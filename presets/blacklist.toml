@@ -10,7 +10,7 @@ reason = "renders white windowed, black fullscreen"
 
 [[preset]]
 name = "suksma - crotch connected siamese"
-reason = "shader compile error"
+reason = "renders near-black (mean luma 18/255, 86-frame dark run over 12 s) under this build; the load does not fail: projectM swallows shader errors and falls back (the \"nz\" variant renders normally)"
 
 [[preset]]
 name = "$$$ Royal - Mashup (452)"

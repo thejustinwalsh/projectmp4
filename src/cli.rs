@@ -68,6 +68,9 @@ struct RenderCmd {
     /// Output path. Default: <input name>.mp4 in the current directory.
     #[arg(long)]
     out: Option<PathBuf>,
+    /// Render only the first N seconds.
+    #[arg(long)]
+    limit_seconds: Option<f64>,
     /// Write the render plan as JSON to this path and exit without rendering.
     #[arg(long)]
     dump_plan: Option<PathBuf>,
@@ -138,6 +141,7 @@ fn render_cmd(c: RenderCmd) -> Result<()> {
     a.fast = c.fast;
     a.out = c.out;
     a.progress = true;
+    a.limit_seconds = c.limit_seconds;
     if let Some(path) = c.dump_plan {
         let plan = render_plan(&a)?;
         std::fs::write(&path, plan.to_json()).map_err(|e| Error::msg(format!("write {}: {e}", path.display())))?;
