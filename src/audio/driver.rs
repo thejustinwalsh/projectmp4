@@ -34,7 +34,11 @@ pub struct Driver {
 /// the length of the zero tail appended to the buffer at load.
 pub const MAX_WINDOW_FRAMES: usize = 1 << 16;
 
-fn default_cache_dir() -> Option<PathBuf> {
+///
+/// Named for what it is, not `default_cache_dir`: that name belongs to the
+/// *writable* projectmp4 preset cache in `presets::packs`, and this directory is
+/// read-only to this program. Nothing in this module may write under it.
+fn agent_deck_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     Some(PathBuf::from(home).join("Library/Application Support/agent-deck"))
 }
@@ -60,7 +64,7 @@ impl Driver {
     /// `want = None` prefers stems and falls back to the mix; `Some(Mix)`
     /// forces the mix; `Some(Stems)` is the same as `None`.
     pub fn load(src: &Source, want: Option<DriverKind>) -> Result<Driver> {
-        match default_cache_dir() {
+        match agent_deck_dir() {
             Some(dir) => Driver::load_with_cache_dir(src, want, &dir),
             None => load_mix(src),
         }
@@ -76,7 +80,19 @@ impl Driver {
             if let Some(paths) = find_stems(&src.sha256, cache_dir) {
                 // An unreadable stem is a miss, not an error.
                 if let Some(pcm) = sum_stems(&paths) {
-                    return Ok(Driver::new(DriverKind::Stems, pcm));
+                    // Past the end of the stems the driver reads zeros. That is
+                    // invisible for a few milliseconds and a frozen picture for
+                    // ten seconds, so a bundle much shorter than the track is
+                    // not trusted. (Longer is harmless: the tail is never read.)
+                    let track = crate::audio::normalise::wav_frames(&src.wav).ok();
+                    match track.filter(|t| stems_too_short(pcm.len() as u64 / 2, *t)) {
+                        None => return Ok(Driver::new(DriverKind::Stems, pcm)),
+                        Some(t) => eprintln!(
+                            "driver: the stems cover {:.1} s of a {:.1} s track; using the full mix instead",
+                            (pcm.len() / 2) as f64 / PIPELINE_RATE as f64,
+                            t as f64 / PIPELINE_RATE as f64
+                        ),
+                    }
                 }
             }
         }
@@ -97,6 +113,13 @@ impl Driver {
         // start <= end, so start + n <= end + MAX_WINDOW_FRAMES * 2 == pcm.len().
         &self.pcm[start..start + n]
     }
+}
+
+/// True when stems of `stem_frames` leave more than `DURATION_TOLERANCE` of a
+/// `track_frames` track uncovered.
+fn stems_too_short(stem_frames: u64, track_frames: u64) -> bool {
+    let slack = (crate::audio::analysis::DURATION_TOLERANCE * PIPELINE_RATE as f64) as u64;
+    track_frames > stem_frames + slack
 }
 
 fn load_mix(src: &Source) -> Result<Driver> {

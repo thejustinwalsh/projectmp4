@@ -24,7 +24,11 @@ pub struct Analysis {
 pub const DEFAULT_MODELS: &str = "/Users/tjw/Developer/agent-deck/native/track-analysis/models";
 
 /// Root of agent-deck's data directory (the one containing `analysis/`).
-fn default_cache_dir() -> Option<PathBuf> {
+///
+/// Named for what it is, not `default_cache_dir`: that name belongs to the
+/// *writable* projectmp4 preset cache in `presets::packs`, and this directory is
+/// read-only to this program. Nothing in this module may write under it.
+fn agent_deck_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     Some(PathBuf::from(home).join("Library/Application Support/agent-deck"))
 }
@@ -55,9 +59,8 @@ pub fn analyse(src: &Source, models: &Path) -> Result<Analysis> {
 /// an estimate that is off by seconds on VBR MP3s). An analyser reporting a
 /// different length has analysed the wrong span and is not trusted.
 pub fn analyse_outcome(src: &Source, models: &Path, track_secs: Option<f64>) -> Result<Outcome> {
-    let cached = default_cache_dir().and_then(|d| read_cache(&cache_path(&d, src)));
-    match cached {
-        Some(a) => Ok(Outcome::Beats(a)),
+    match agent_deck_dir() {
+        Some(d) => analyse_outcome_with_cache_dir(src, models, &d, track_secs),
         None => compute(src, models, track_secs),
     }
 }
@@ -66,26 +69,44 @@ fn cache_path(dir: &Path, src: &Source) -> PathBuf {
     dir.join("analysis").join(format!("{}.json", src.sha256))
 }
 
-/// `cache_dir` is the agent-deck data root; the entry lives at
-/// `<cache_dir>/analysis/<sha256>.json`.
-pub fn analyse_with_cache_dir(src: &Source, models: &Path, cache_dir: &Path) -> Result<Analysis> {
-    if let Some(a) = read_cache(&cache_path(cache_dir, src)) {
-        return Ok(a);
-    }
-    match compute(src, models, None)? {
-        Outcome::Beats(a) => Ok(a),
-        Outcome::NoBeats(why) => Err(Error::msg(format!("beat analysis: {why}"))),
+/// [`analyse_outcome`] against an explicit agent-deck data root: the entry lives
+/// at `<cache_dir>/analysis/<sha256>.json`. This is the one body both production
+/// and tests run, so a test through it exercises the same cache check and the
+/// same duration guard as a real render. A cached entry whose duration differs
+/// from `track_secs` by more than [`DURATION_TOLERANCE`] is a miss.
+pub fn analyse_outcome_with_cache_dir(
+    src: &Source,
+    models: &Path,
+    cache_dir: &Path,
+    track_secs: Option<f64>,
+) -> Result<Outcome> {
+    match read_cache(&cache_path(cache_dir, src), track_secs) {
+        Some(o) => Ok(o),
+        None => compute(src, models, track_secs),
     }
 }
 
-fn read_cache(path: &Path) -> Option<Analysis> {
+fn read_cache(path: &Path, track_secs: Option<f64>) -> Option<Outcome> {
     let bytes = std::fs::read(path).ok()?;
     let v: Value = serde_json::from_slice(&bytes).ok()?;
     let (a, note) = parse_cache(&v)?;
+    // The key says nothing about length, and a duration that is too short drops
+    // every downbeat past it: the rest of the track would sit on one preset. A
+    // fresh analysis is the right answer to a disagreement, not a truncation.
+    if let Some(r) = track_secs.filter(|r| (a.duration - r).abs() > DURATION_TOLERANCE) {
+        eprintln!(
+            "render: beat analysis: cached analysis says {:.1} s but the track is {r:.1} s; ignoring it and analysing afresh",
+            a.duration
+        );
+        return None;
+    }
     if let Some(n) = note {
         eprintln!("render: beat analysis: {n}");
     }
-    Some(a)
+    if a.downbeats.is_empty() {
+        return Some(Outcome::NoBeats("the cached analysis found no beats in this track".into()));
+    }
+    Some(Outcome::Beats(a))
 }
 
 fn compute(src: &Source, models: &Path, track_secs: Option<f64>) -> Result<Outcome> {
@@ -121,7 +142,7 @@ const BEATS_PER_BAR: usize = 4;
 
 /// Seconds by which the analyser's duration may differ from the track's before
 /// its schedule is not trusted: the beats would be cut off or stretched.
-const DURATION_TOLERANCE: f64 = 1.0;
+pub(crate) const DURATION_TOLERANCE: f64 = 1.0;
 
 /// One timestamp array of an analyser result, cleaned and accounted for.
 struct Cleaned {
@@ -223,39 +244,61 @@ fn times(v: &Value, key: &str) -> Option<Vec<f64>> {
 
 /// A cache entry: the same analyser wrote it, so a final timestamp a few ms past
 /// the end is dropped like in a fresh result (rejecting it would force a slow
-/// re-analysis on every run). What still marks an entry as stale or corrupt, and
-/// is a miss: a non-numeric or non-finite timestamp, timestamps out of order or
-/// repeated, a missing or non-positive duration or bpm, nothing left after
-/// dropping, or a negative timestamp.
+/// re-analysis on every run).
+///
+/// Strictness sits on the two fields that reach the screen. `downbeats` is the
+/// switch schedule and `duration` bounds it, so a non-numeric, non-finite,
+/// negative, out-of-order or repeated downbeat, or a missing or non-positive
+/// duration, is a miss, as is an entry whose downbeats all lie past its own
+/// end. `beats` and `bpm` drive no pixel (`bpm` only labels the plan), so they
+/// are read leniently: cleaned, never a reason to throw the entry away.
+///
+/// An entry with both arrays genuinely empty is a real answer, "this track has
+/// no beats", and is returned as an `Analysis` with no downbeats; refusing it
+/// would send every ambient render back through the slow analyser.
 fn parse_cache(v: &Value) -> Option<(Analysis, Option<String>)> {
-    let mut beats = times(v, "beats")?;
+    let duration = v.get("duration")?.as_f64().filter(|d| d.is_finite() && *d > 0.0)?;
     let mut downbeats = times(v, "downbeats")?;
-    let duration = v.get("duration")?.as_f64().filter(|d| *d > 0.0)?;
-    // Order and repeats are checked first, on exactly what was stored.
-    let ascending = |t: &[f64]| t.windows(2).all(|w| w[1] > w[0]);
-    if !ascending(&beats) || !ascending(&downbeats) || beats.iter().chain(&downbeats).any(|t| *t < 0.0) {
+    let ascending = downbeats.windows(2).all(|w| w[1] > w[0]);
+    if !ascending || downbeats.iter().any(|t| *t < 0.0) {
         return None;
     }
-    let n = beats.len() + downbeats.len();
-    beats.retain(|t| *t < duration);
+    let b = clean(v, "beats", duration);
+    if !b.present {
+        return None;
+    }
+    let beats = b.t;
+    let stored = downbeats.len();
     downbeats.retain(|t| *t < duration);
-    let dropped = n - beats.len() - downbeats.len();
-    if beats.is_empty() || downbeats.is_empty() {
-        return None;
+    let dropped = stored - downbeats.len();
+    let mut note = (dropped > 0).then(|| format!("cached analysis: {dropped} timestamps at or past the end of the track dropped"));
+    if downbeats.is_empty() {
+        if stored > 0 {
+            return None; // every downbeat past its own duration: stale
+        }
+        if beats.is_empty() {
+            let stored_beats = v.get("beats").and_then(Value::as_array).map_or(0, Vec::len);
+            if stored_beats > 0 {
+                return None; // beats were stored but none is usable: corrupt, not beatless
+            }
+            return Some((Analysis { bpm: 0.0, beats, downbeats, duration, from_cache: true }, None));
+        }
+        downbeats = beats.iter().copied().step_by(BEATS_PER_BAR).collect();
+        note = Some(format!("cached analysis: {} beats but no downbeats; taking every {BEATS_PER_BAR}th beat as a downbeat", beats.len()));
     }
-    let mut bpm = v.get("bpm")?.as_f64()? as f32;
+    let mut bpm = v.get("bpm").and_then(Value::as_f64).unwrap_or(0.0) as f32;
     if !(bpm.is_finite() && bpm > 0.0) {
         // The analyser reports 0.0 when its BPM estimate fails; the beat grid
-        // is still good, so take the median inter-beat interval instead.
+        // is still good, so take the median inter-beat interval instead. With
+        // under two beats it stays 0 (unknown): it labels the plan, nothing more.
         let mut gaps: Vec<f64> = beats.windows(2).map(|w| w[1] - w[0]).collect();
         gaps.sort_by(|a, b| a.total_cmp(b));
-        let median = *gaps.get(gaps.len() / 2)?;
-        if median <= 0.0 {
-            return None;
-        }
-        bpm = (60.0 / median) as f32;
+        bpm = match gaps.get(gaps.len() / 2) {
+            Some(m) if *m > 0.0 => (60.0 / m) as f32,
+            _ => 0.0,
+        };
     }
-    let note = (dropped > 0).then(|| format!("cached analysis: {dropped} timestamps at or past the end of the track dropped"));
+    let beats = if beats.is_empty() { downbeats.clone() } else { beats };
     Some((Analysis { bpm, beats, downbeats, duration, from_cache: true }, note))
 }
 
@@ -285,9 +328,11 @@ mod tests {
     }
 
     #[test]
-    fn zero_bpm_with_under_two_beats_is_rejected() {
+    fn zero_bpm_with_under_two_beats_is_kept_with_an_unknown_bpm() {
+        // bpm labels the plan JSON and drives no pixel: not a reason to discard the schedule.
         let v = json!({"bpm": 0.0, "beats": [1.0], "downbeats": [1.0], "duration": 10.0});
-        assert!(parse(&v, true).is_none());
+        let a = parse(&v, true).expect("a usable schedule must not be thrown away over bpm");
+        assert_eq!((a.bpm, a.downbeats), (0.0, vec![1.0]));
     }
 
     #[test]
@@ -317,16 +362,49 @@ mod tests {
         // The same applies to a cache entry written by that analyser: dropped, not a miss.
         let c = parse(&v, true).expect("a cached final downbeat past the end must not force a re-analysis");
         assert_eq!(c.downbeats, vec![0.5, 2.5]);
-        // What does mark a cache entry as bad: repeats, disorder, negatives, nothing left.
+        // What marks a cache entry as bad is damage to the fields that reach the screen:
+        // the downbeats (repeats, disorder, negatives, garbage, all past the end) and the duration.
         for bad in [
-            json!({"bpm": 120.0, "beats": [0.5, 0.5, 1.0], "downbeats": [0.5], "duration": 10.0}),
-            json!({"bpm": 120.0, "beats": [1.0, 0.5], "downbeats": [0.5], "duration": 10.0}),
-            json!({"bpm": 120.0, "beats": [-0.5, 1.0], "downbeats": [1.0], "duration": 10.0}),
+            json!({"bpm": 120.0, "beats": [0.5, 1.0], "downbeats": [0.5, 0.5], "duration": 10.0}),
+            json!({"bpm": 120.0, "beats": [0.5, 1.0], "downbeats": [1.0, 0.5], "duration": 10.0}),
+            json!({"bpm": 120.0, "beats": [0.5, 1.0], "downbeats": [-0.5, 1.0], "duration": 10.0}),
             json!({"bpm": 120.0, "beats": [10.5], "downbeats": [10.5], "duration": 10.0}),
-            json!({"bpm": 120.0, "beats": ["x", 1.0], "downbeats": [1.0], "duration": 10.0}),
+            json!({"bpm": 120.0, "beats": [0.5, 1.0], "downbeats": ["x", 1.0], "duration": 10.0}),
+            json!({"bpm": 120.0, "beats": [0.5, 1.0], "downbeats": [1.0]}),
+            json!({"bpm": 120.0, "beats": [0.5, 1.0], "downbeats": [1.0], "duration": 0.0}),
+            json!({"bpm": 120.0, "downbeats": [1.0], "duration": 10.0}),
+            // Beats stored, none usable, no downbeats: corrupt, not "beatless".
+            json!({"bpm": 120.0, "beats": ["x", -1.0], "downbeats": [], "duration": 10.0}),
         ] {
             assert!(parse(&bad, true).is_none(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_damaged_beats_array_does_not_cost_the_cache_entry() {
+        // `beats` reaches no pixel; discarding the entry would force a full neural
+        // re-analysis on every future run of the track, for data that is then unused.
+        for beats in [json!([0.5, 0.5, 1.0]), json!([1.0, 0.5]), json!([-0.5, 1.0]), json!(["x", 1.0]), json!([12.0, 1.0])] {
+            let v = json!({"bpm": 120.0, "beats": beats, "downbeats": [1.0, 3.0], "duration": 10.0});
+            let a = parse(&v, true).unwrap_or_else(|| panic!("entry discarded over beats {beats}"));
+            assert_eq!(a.downbeats, vec![1.0, 3.0], "{beats}");
+            assert!(a.beats.windows(2).all(|w| w[1] > w[0]), "{beats} -> {:?}", a.beats);
+        }
+    }
+
+    #[test]
+    fn a_beatless_analysis_can_be_cached() {
+        // The cache must be able to say "this track has no beats", or an ambient
+        // track re-runs the analyser on every render, forever.
+        let v = json!({"bpm": 0.0, "beats": [], "downbeats": [], "duration": 90.0});
+        let (a, note) = parse_cache(&v).expect("a legitimately beatless entry must be a hit");
+        assert!(a.downbeats.is_empty() && a.beats.is_empty() && a.from_cache && a.duration == 90.0);
+        assert!(note.is_none());
+        // Beats without downbeats in the cache follow the fresh-result rule.
+        let v = json!({"bpm": 0.0, "beats": [1.0, 1.5, 2.0, 2.5, 3.0], "downbeats": [], "duration": 10.0});
+        let (a, note) = parse_cache(&v).unwrap();
+        assert_eq!(a.downbeats, vec![1.0, 3.0]);
+        assert!(note.unwrap().contains("downbeat"));
     }
 
     #[test]

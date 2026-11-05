@@ -55,15 +55,25 @@ fn mean_over(env: &[f64], from_s: f64, to_s: f64, hop_s: f64) -> f64 {
     env[lo..hi].iter().sum::<f64>() / (hi - lo) as f64
 }
 
-/// Rise in low-band energy across each downbeat (after minus before).
-fn downbeat_steps(a: &Analysis, d: &Driver) -> Vec<f64> {
+/// Rise in low-band energy across each downbeat (after minus before), or
+/// `None` where the track does not hold a full `STEP_WINDOW_S` of envelope on
+/// both sides. Clamping instead would compare a 0.12 s "before" (six hops of
+/// noise) against a 1 s "after", and that near-random step would feed the
+/// median that calibrates every other downbeat.
+fn downbeat_steps(downbeats: &[f64], d: &Driver) -> Vec<Option<f64>> {
     let env = low_band_envelope(d);
     let hop_s = HOP as f64 / d.rate as f64;
-    a.downbeats
+    let span = d.frames() as f64 / d.rate as f64;
+    downbeats
         .iter()
         .map(|&t| {
-            mean_over(&env, t, t + STEP_WINDOW_S, hop_s)
-                - mean_over(&env, t - STEP_WINDOW_S, t, hop_s)
+            if t - STEP_WINDOW_S < 0.0 || t + STEP_WINDOW_S > span {
+                return None;
+            }
+            Some(
+                mean_over(&env, t, t + STEP_WINDOW_S, hop_s)
+                    - mean_over(&env, t - STEP_WINDOW_S, t, hop_s),
+            )
         })
         .collect()
 }
@@ -76,19 +86,102 @@ fn median(mut v: Vec<f64>) -> f64 {
     v[v.len() / 2]
 }
 
+/// What the grid had to supply because the analysis left stretches without downbeats.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct GridFill {
+    /// Grid points added.
+    pub added: usize,
+    /// Seconds of the track that had no downbeat to switch on.
+    pub secs: f64,
+}
+
+impl GridFill {
+    /// What to tell the user, or `None` when the music supplied every switch point.
+    pub fn notice(&self, duration: f64, grid: f64) -> Option<String> {
+        (self.added > 0).then(|| {
+            format!(
+                "the beat analysis left {:.0} s of this {duration:.0} s track without downbeats; \
+                 switching presets on a fixed {grid} s grid there",
+                self.secs
+            )
+        })
+    }
+}
+
+/// Fewer downbeats than this is not a schedule: one detected beat tells nothing
+/// about where the next change belongs, and treating it as a schedule is worse
+/// than having none.
+const MIN_DOWNBEATS: usize = 2;
+
+/// `downbeats` plus grid points (`grid` seconds apart) across every stretch of
+/// `0..duration` longer than `2 * grid` that has none. The head counts from the
+/// opening preset at `t = 0` and the tail runs to `duration`, so a 90 s ambient
+/// intro, a single detected beat and a wholly beatless track are one case:
+/// no downbeat is no reason for the picture to stop moving. A degenerate count
+/// (see [`MIN_DOWNBEATS`]) is discarded and the whole track gets the grid, the
+/// same as zero; so a track too short for the `2 * grid` rule still gets one.
+pub fn fill_gaps(downbeats: &[f64], duration: f64, grid: f64) -> (Vec<f64>, GridFill) {
+    let mut out: Vec<f64> = downbeats.iter().copied().filter(|t| t.is_finite() && *t >= 0.0 && *t < duration).collect();
+    let mut fill = GridFill::default();
+    if !(grid.is_finite() && grid > 0.0 && duration.is_finite()) {
+        return (out, fill);
+    }
+    let degenerate = out.len() < MIN_DOWNBEATS;
+    if degenerate {
+        out.clear();
+    }
+    let mut edges = vec![0.0];
+    edges.extend_from_slice(&out);
+    edges.push(duration);
+    let last = edges.len() - 2;
+    let mut extra = Vec::new();
+    for (i, w) in edges.windows(2).enumerate() {
+        let (prev, next) = (w[0], w[1]);
+        if next - prev <= if degenerate { grid } else { 2.0 * grid } {
+            continue;
+        }
+        // Stay clear of the real downbeat that ends the gap; the tail runs to the end.
+        let limit = if i == last { duration } else { next - grid / 2.0 };
+        let before = extra.len();
+        let mut k = 1.0;
+        while prev + k * grid < limit {
+            extra.push(prev + k * grid);
+            k += 1.0;
+        }
+        if extra.len() > before {
+            fill.secs += next - prev;
+        }
+    }
+    fill.added = extra.len();
+    out.extend(extra);
+    out.sort_by(|a, b| a.total_cmp(b));
+    (out, fill)
+}
+
 /// Switch points: `min_gap` seconds apart at least, or `drop_gap` for a drop
-/// (which is also marked `Hard`). Every point is a downbeat, `< a.duration`.
+/// (which is also marked `Hard`). Every point is a downbeat or, where the
+/// analysis has none to offer, a grid point; all are `< a.duration`.
 pub fn plan_switches(a: &Analysis, d: &Driver, min_gap: f64, drop_gap: f64) -> Vec<SwitchPoint> {
-    let steps = downbeat_steps(a, d);
-    let thr = DROP_FACTOR * median(steps.iter().map(|s| s.abs()).collect());
+    plan_switches_reporting(a, d, min_gap, drop_gap).0
+}
+
+/// [`plan_switches`], and what the grid had to cover so the caller can say so.
+pub fn plan_switches_reporting(a: &Analysis, d: &Driver, min_gap: f64, drop_gap: f64) -> (Vec<SwitchPoint>, GridFill) {
+    let (points, fill) = fill_gaps(&a.downbeats, a.duration, min_gap);
+    let steps = downbeat_steps(&points, d);
+    // The scale is the typical *non-zero* step. Digital silence gives steps of
+    // exactly 0.0, and when those are the majority a median over all of them is
+    // 0.0 and no step could ever exceed it by a factor: the real drop would go
+    // unmarked. A track with no non-zero step has nothing to call a drop.
+    let thr = DROP_FACTOR * median(steps.iter().flatten().map(|s| s.abs()).filter(|s| *s > 0.0).collect());
     let mut out = Vec::new();
     let mut last = 0.0;
-    for (&t, &step) in a.downbeats.iter().zip(&steps) {
+    for (&t, &step) in points.iter().zip(&steps) {
         if t >= a.duration {
             break;
         }
         let elapsed = t - last;
-        let drop = thr > 0.0 && step > thr;
+        let drop = step.is_some_and(|s| s > thr);
         let cut = if drop && elapsed >= drop_gap {
             Cut::Hard
         } else if elapsed >= min_gap {
@@ -99,5 +192,5 @@ pub fn plan_switches(a: &Analysis, d: &Driver, min_gap: f64, drop_gap: f64) -> V
         out.push(SwitchPoint { t, cut });
         last = t;
     }
-    out
+    (out, fill)
 }

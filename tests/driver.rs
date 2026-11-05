@@ -249,6 +249,10 @@ fn window_is_exactly_min_frames_cap_for_every_input() {
         assert!(w[..real].iter().all(|s| *s == 0.75), "{label}: real part {:?}", &w[..real.min(8)]);
         assert!(w[real..].iter().all(|s| *s == 0.0), "{label}: tail not zero-padded");
     }
+    // The "zero frames" row asserts over empty slices, so on its own a `window` that returned
+    // an empty slice for every input would pass it. Same position, one frame: a live window.
+    assert!(d.window(sec(2.0), 0).is_empty());
+    assert_eq!(d.window(sec(2.0), 1), &[0.75, 0.75], "window is empty for every input");
 }
 
 #[test]
@@ -264,4 +268,90 @@ fn bundle_for_another_source_is_a_miss() {
     let root = synthetic_cache(&[0.5; 4], &[0.25; 4], "complete", "someone-else");
     let d = Driver::load_with_cache_dir(&synthetic_source(), None, &root).unwrap();
     assert_eq!(d.kind, DriverKind::Mix);
+}
+
+// --- stems that cover much less than the track ---------------------------------------
+
+fn sine_pcm(frames: usize, level: f32) -> Vec<f32> {
+    vec![level; frames * 2]
+}
+
+/// A source whose mix wav is `track_frames` long, beside a stem bundle of
+/// `stem_frames`. The driver must know the track's length from the wav itself.
+fn source_with_track(dir: &Path, track_frames: usize) -> Source {
+    let wav = dir.join("track.wav");
+    write_wav(&wav, &sine_pcm(track_frames, 0.1));
+    Source { wav, sha256: SHA.into(), duration: 0.0, title: None, artist: None }
+}
+
+fn stems_vs_track(stem_frames: usize, track_frames: usize) -> Driver {
+    let base = tmpdir();
+    let src = source_with_track(&base, track_frames);
+    let root = base.join("cache");
+    let bundle = root.join("stems/bundles").join(JOB);
+    build_cache(&root, &bundle, JOB, &sine_pcm(stem_frames, 0.5), &sine_pcm(stem_frames, 0.25), "complete", SHA, [stem_frames, stem_frames]);
+    Driver::load_with_cache_dir(&src, None, &root).unwrap()
+}
+
+#[test]
+fn stems_that_stop_well_short_of_the_track_fall_back_to_the_mix() {
+    // A 12 s track whose stems cover 1 s: the last 11 s would be driven by the
+    // zero pad, a frozen picture over live audio.
+    let d = stems_vs_track(48_000, 12 * 48_000);
+    assert_eq!(d.kind, DriverKind::Mix, "stems 11 s short of the track were trusted");
+    assert_eq!(d.frames(), 12 * 48_000);
+}
+
+#[test]
+fn the_stem_length_bound_is_one_second_short_and_unbounded_long() {
+    let track = 12 * 48_000;
+    // ravezilla's real shortfall is 648 frames; half a second and exactly the tolerance are fine.
+    for short in [648, 24_000, 48_000] {
+        assert_eq!(stems_vs_track(track - short, track).kind, DriverKind::Stems, "{short} frames short");
+    }
+    assert_eq!(stems_vs_track(track - 48_001, track).kind, DriverKind::Mix, "one frame past the tolerance");
+    // Longer is harmless: the tail is never sampled.
+    assert_eq!(stems_vs_track(track + 5 * 48_000, track).kind, DriverKind::Stems);
+}
+
+// --- the WAV header that every duration is computed from -------------------------------
+
+fn wav_with(dir: &Path, name: &str, tag: u16, channels: u16, rate: u32, bits: u16, data: &[u8]) -> PathBuf {
+    let mut b = Vec::new();
+    b.extend_from_slice(b"RIFF");
+    b.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+    b.extend_from_slice(b"WAVEfmt ");
+    b.extend_from_slice(&16u32.to_le_bytes());
+    b.extend_from_slice(&tag.to_le_bytes());
+    b.extend_from_slice(&channels.to_le_bytes());
+    b.extend_from_slice(&rate.to_le_bytes());
+    b.extend_from_slice(&(rate * channels as u32 * bits as u32 / 8).to_le_bytes());
+    b.extend_from_slice(&(channels * bits / 8).to_le_bytes());
+    b.extend_from_slice(&bits.to_le_bytes());
+    b.extend_from_slice(b"data");
+    b.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    b.extend_from_slice(data);
+    let p = dir.join(name);
+    std::fs::write(&p, b).unwrap();
+    p
+}
+
+#[test]
+fn wav_frames_counts_a_canonical_file_and_refuses_any_other_format() {
+    use projectmp4::audio::wav_frames;
+    let dir = tmpdir();
+    let data = vec![0u8; 8 * 100];
+    assert_eq!(wav_frames(&wav_with(&dir, "ok.wav", 3, 2, 48_000, 32, &data)).unwrap(), 100);
+    assert_eq!(wav_frames(&wav_with(&dir, "empty.wav", 3, 2, 48_000, 32, &[])).unwrap(), 0);
+    // Each of these would divide by the wrong frame size or rate if trusted.
+    for (what, tag, ch, rate, bits) in [
+        ("44.1 kHz", 3, 2, 44_100, 32),
+        ("mono", 3, 1, 48_000, 32),
+        ("16-bit", 1, 2, 48_000, 16),
+        ("32-bit integer", 1, 2, 48_000, 32),
+        ("16-bit under a float tag", 3, 2, 48_000, 16),
+    ] {
+        let e = wav_frames(&wav_with(&dir, "bad.wav", tag, ch, rate, bits, &data)).expect_err(what);
+        assert!(e.to_string().contains("not a normalised WAV") && e.to_string().contains("48000"), "{what}: {e}");
+    }
 }

@@ -4,8 +4,9 @@
 //! preview without rendering anything.
 
 use crate::audio::analysis::DEFAULT_MODELS;
-use crate::audio::timeline::{plan_switches, Cut, SwitchPoint};
-use crate::audio::{analyse_outcome, normalise, Driver, DriverKind, Outcome};
+use crate::audio::normalise::{wav_frames, PIPELINE_RATE};
+use crate::audio::timeline::{plan_switches_reporting, Cut, SwitchPoint};
+use crate::audio::{analyse_outcome, normalise, Analysis, Driver, DriverKind, Outcome};
 use crate::ffi::{Error, Result};
 use crate::presets::{default_cache_dir, Manifest, Packs};
 use crate::render::MarkStyle;
@@ -258,21 +259,28 @@ pub(crate) fn prepare(args: &RenderArgs) -> Result<Prepared> {
     }
     let tmp = TempDir::new()?;
     let src = normalise(&args.input, &tmp.0)?;
-    let wav_secs = wav_frames(&src.wav)? as f64 / crate::audio::normalise::PIPELINE_RATE as f64;
+    let frames = require_samples(wav_frames(&src.wav)?, &args.input)?;
+    let wav_secs = frames as f64 / PIPELINE_RATE as f64;
     // Beatless music (an ambient pad) gives the analyser nothing to find. That
     // is not a reason to refuse the track: switch on a fixed grid instead.
     // That applies only to an analyser that ran and found no beats. One that
     // could not run (missing or broken models) is an error the user can fix:
-    // falling back would hide it for good.
-    let analysis = match analyse_outcome(&src, &args.models, Some(wav_secs))? {
-        Outcome::Beats(a) => a,
+    // falling back would hide it for good. Stretches the analysis leaves
+    // without downbeats are filled the same way by `plan_switches_reporting`.
+    let (analysis, beatless) = match analyse_outcome(&src, &args.models, Some(wav_secs))? {
+        Outcome::Beats(a) => (a, false),
         Outcome::NoBeats(why) => {
             eprintln!("render: {why}; switching presets on a fixed {MIN_GAP} s grid");
-            fixed_grid(wav_secs)
+            (Analysis { bpm: 0.0, beats: Vec::new(), downbeats: Vec::new(), duration: wav_secs, from_cache: false }, true)
         }
     };
     let driver = Driver::load(&src, args.driver)?;
-    let mut switches = plan_switches(&analysis, &driver, MIN_GAP, DROP_GAP);
+    let (mut switches, fill) = plan_switches_reporting(&analysis, &driver, MIN_GAP, DROP_GAP);
+    if !beatless {
+        if let Some(n) = fill.notice(wav_secs, MIN_GAP) {
+            eprintln!("render: {n}");
+        }
+    }
 
     let non_empty = |s: &Option<String>| s.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
     let stem = args.input.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
@@ -350,31 +358,6 @@ fn resolve_pool(args: &RenderArgs) -> Result<(Vec<PathBuf>, Option<PathBuf>)> {
     Ok((pool, Some(packs.textures)))
 }
 
-/// Stereo frames in a canonical 48 kHz f32 stereo WAV, from its `data` chunk size.
-fn wav_frames(path: &std::path::Path) -> Result<u64> {
-    use std::io::{Read, Seek, SeekFrom};
-    let err = |e: std::io::Error| Error::msg(format!("read {}: {e}", path.display()));
-    let mut f = std::fs::File::open(path).map_err(err)?;
-    let mut head = [0u8; 12];
-    f.read_exact(&mut head).map_err(err)?;
-    if &head[..4] != b"RIFF" || &head[8..] != b"WAVE" {
-        return Err(Error::msg(format!("{} is not a WAV file", path.display())));
-    }
-    loop {
-        let mut ch = [0u8; 8];
-        f.read_exact(&mut ch).map_err(err)?;
-        let size = u32::from_le_bytes([ch[4], ch[5], ch[6], ch[7]]) as u64;
-        if &ch[..4] == b"data" {
-            // ffmpeg streaming writes may leave 0xFFFFFFFF; fall back to the file length.
-            let len = f.metadata().map_err(err)?.len();
-            let pos = f.stream_position().map_err(err)?;
-            let bytes = if size == 0xFFFF_FFFF || pos + size > len { len - pos } else { size };
-            return Ok(bytes / 8);
-        }
-        f.seek(SeekFrom::Current(((size + 1) & !1) as i64)).map_err(err)?;
-    }
-}
-
 /// A trial-render limit must be a positive, finite number of seconds: anything
 /// else would silently mean "the whole track".
 pub fn check_limit(l: f64) -> Result<()> {
@@ -385,9 +368,26 @@ pub fn check_limit(l: f64) -> Result<()> {
     }
 }
 
-/// Stand-in for a failed beat analysis: a "downbeat" every `MIN_GAP` seconds
-/// (bpm 0 marks it as not measured).
-fn fixed_grid(duration: f64) -> crate::audio::Analysis {
-    let grid: Vec<f64> = (0..).map(|i| i as f64 * MIN_GAP).take_while(|t| *t < duration).collect();
-    crate::audio::Analysis { bpm: 0.0, beats: grid.clone(), downbeats: grid, duration, from_cache: false }
+/// An input that decodes to nothing (ID3 tags only, a header-only truncation)
+/// would otherwise become a one-frame video and say nothing.
+fn require_samples(frames: u64, input: &std::path::Path) -> Result<u64> {
+    if frames == 0 {
+        return Err(Error::msg(format!("{} decoded to no audio samples; there is nothing to render", input.display())));
+    }
+    Ok(frames)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_decode_with_no_samples_is_an_error_naming_the_input() {
+        // `normalise` already refuses most such inputs (ffprobe reports no duration for
+        // them), so the only way to reach this is a file with a duration and no samples,
+        // which ffmpeg cannot be made to produce from a fixture: tested at the seam.
+        let e = require_samples(0, std::path::Path::new("ambient.mp3")).unwrap_err().to_string();
+        assert!(e.contains("ambient.mp3") && e.contains("no audio samples"), "{e}");
+        assert_eq!(require_samples(1, std::path::Path::new("x")).unwrap(), 1);
+    }
 }

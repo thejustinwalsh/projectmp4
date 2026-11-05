@@ -228,21 +228,34 @@ pub(crate) fn is_blacklisted(list: &[BlacklistEntry], file_name: &str) -> bool {
 }
 
 /// Genre weighting. `score = bass_w * bass + other_w * (react - bass) + tiers`.
+///
+/// Weights are never negative: a negative weight does not say "less bass", it
+/// inverts the order, so the presets that react to the audio *least* (a
+/// screensaver scores 0) would outrank every reactive one. Gentleness is a
+/// statement about magnitude and is expressed as one: `bass_cap`.
 struct Genre {
     cats: &'static [&'static str],
     bass_w: i64,
     other_w: i64,
+    /// Presets whose bass score exceeds this are not candidates: they follow
+    /// the kick too hard for the genre. `None` places no limit.
+    bass_cap: Option<u32>,
 }
 
 fn genre(profile: &str) -> Option<Genre> {
     Some(match profile {
-        "deathstep" | "dubstep" => Genre { cats: &["Reaction", "Geometric", "Supernova"], bass_w: 4, other_w: 1 },
-        "dancehall" => Genre { cats: &["Reaction", "Dancer"], bass_w: 2, other_w: 2 },
-        // Calm and shimmering: penalise kick-following, reward mid/treble/volume drift.
-        "ambient" => Genre { cats: &["Hypnotic", "Fractal"], bass_w: -2, other_w: 1 },
+        "deathstep" | "dubstep" => Genre { cats: &["Reaction", "Geometric", "Supernova"], bass_w: 4, other_w: 1, bass_cap: None },
+        "dancehall" => Genre { cats: &["Reaction", "Dancer"], bass_w: 2, other_w: 2, bass_cap: None },
+        // Calm and shimmering: rank by mid/treble/volume drift alone, and rule out the
+        // kick-followers outright. 9 is three bass references, the median of the
+        // Hypnotic and Fractal shader presets, so about half of them stay.
+        "ambient" => Genre { cats: &["Hypnotic", "Fractal"], bass_w: 0, other_w: 1, bass_cap: Some(AMBIENT_BASS_CAP) },
         _ => return None,
     })
 }
+
+/// Bass score above which a preset is too kick-driven for the ambient profile.
+const AMBIENT_BASS_CAP: u32 = 9;
 
 /// Bonus for also appearing in the BLTC best-of (a second human curation pass).
 const TIER_BLTC: i64 = 100;
@@ -286,6 +299,7 @@ fn score_file(p: &Path) -> Option<Score> {
 }
 
 /// Every shader preset in the profile's categories that is not blacklisted,
+/// references at least one audio variable and is within the genre's bass cap,
 /// best first (ties broken by path so the order is deterministic).
 pub fn eligible(packs: &Packs, profile: &str) -> Result<Vec<Candidate>> {
     let g = genre(profile).ok_or_else(|| {
@@ -307,6 +321,14 @@ pub fn eligible(packs: &Packs, profile: &str) -> Result<Vec<Candidate>> {
             }
             let score = score_file(&path)?;
             if !score.shader {
+                return None;
+            }
+            // A preset that reads no audio variable at all does not respond to the
+            // music, whatever its weights say; it is a screensaver, not a candidate.
+            if score.react == 0 {
+                return None;
+            }
+            if g.bass_cap.is_some_and(|cap| score.bass > cap) {
                 return None;
             }
             let key = norm(name);
@@ -407,6 +429,17 @@ mod tests {
         ] {
             assert!(!is_blacklisted(&bl, miss), "{miss}");
         }
+    }
+
+    #[test]
+    fn no_profile_weights_bass_negatively() {
+        // A negative weight inverts the ordering instead of softening it: the
+        // preset that ignores the audio entirely (score 0) outranks any reactive one.
+        for p in PROFILES {
+            let g = genre(p).unwrap_or_else(|| panic!("profile {p} has no genre"));
+            assert!(g.bass_w >= 0 && g.other_w >= 0, "{p}: bass_w {} other_w {}", g.bass_w, g.other_w);
+        }
+        assert!(genre("ambient").unwrap().bass_cap.is_some(), "ambient's gentleness is a cap on magnitude");
     }
 
     #[test]
