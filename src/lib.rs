@@ -4,3 +4,4 @@ pub mod audio;
 pub mod presets;
 pub use presets::Packs;
 pub mod render;
+pub mod encode;
