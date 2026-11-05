@@ -36,6 +36,14 @@ mod gl {
     pub const FRAGMENT_SHADER: GLenum = 0x8B30;
     pub const COMPILE_STATUS: GLenum = 0x8B81;
     pub const LINK_STATUS: GLenum = 0x8B82;
+    pub const CURRENT_PROGRAM: GLenum = 0x8B8D;
+    pub const VERTEX_ARRAY_BINDING: GLenum = 0x85B5;
+    pub const ACTIVE_TEXTURE: GLenum = 0x84E0;
+    pub const TEXTURE_BINDING_2D: GLenum = 0x8069;
+    pub const BLEND_DST_RGB: GLenum = 0x80C8;
+    pub const BLEND_SRC_RGB: GLenum = 0x80C9;
+    pub const BLEND_DST_ALPHA: GLenum = 0x80CA;
+    pub const BLEND_SRC_ALPHA: GLenum = 0x80CB;
 
     unsafe extern "C" {
         #[link_name = "glCreateShader"] pub fn create_shader(ty: GLenum) -> GLuint;
@@ -65,6 +73,9 @@ mod gl {
         #[link_name = "glTexParameteri"] pub fn tex_parameteri(t: GLenum, p: GLenum, v: GLint);
         #[link_name = "glTexImage2D"]
         pub fn tex_image_2d(t: GLenum, level: GLint, internal: GLint, w: GLsizei, h: GLsizei, border: GLint, format: GLenum, ty: GLenum, px: *const c_void);
+        #[link_name = "glGetIntegerv"] pub fn get_integerv(p: GLenum, out: *mut GLint);
+        #[link_name = "glIsEnabled"] pub fn is_enabled(cap: GLenum) -> u8;
+        #[link_name = "glBlendFuncSeparate"] pub fn blend_func_separate(sr: GLenum, dr: GLenum, sa: GLenum, da: GLenum);
         #[link_name = "glEnable"] pub fn enable(cap: GLenum);
         #[link_name = "glDisable"] pub fn disable(cap: GLenum);
         #[link_name = "glBlendFunc"] pub fn blend_func(s: GLenum, d: GLenum);
@@ -180,18 +191,30 @@ impl GlOverlay {
     }
 
     /// Draws the title block and the watermark tile `bass` selects onto the
-    /// bound framebuffer, which is `w`*`h`. Leaves the GL state projectM uses as it found it.
+    /// bound framebuffer, which is `w`*`h`. Restores what it changes: the
+    /// program, vertex array, active texture unit and its 2D binding, and the
+    /// blend enable and function. (Framebuffer and viewport are not touched.)
     pub fn draw(&self, overlay: &Overlay, w: u32, h: u32, bass: f32) {
         let quad = |tex: &Tex, l: &Layer<'_>| unsafe {
             gl::uniform4f(self.rect, l.x as f32, l.y as f32, l.w as f32, l.h as f32);
             gl::bind_texture(gl::TEXTURE_2D, tex.id);
             gl::draw_arrays(gl::TRIANGLE_STRIP, 0, 4);
         };
+        let geti = |p: gl::GLenum| unsafe {
+            let mut v = 0;
+            gl::get_integerv(p, &mut v);
+            v
+        };
+        let (program, vao, unit) = (geti(gl::CURRENT_PROGRAM), geti(gl::VERTEX_ARRAY_BINDING), geti(gl::ACTIVE_TEXTURE));
+        let blend_on = unsafe { gl::is_enabled(gl::BLEND) } != 0;
+        let blend = [geti(gl::BLEND_SRC_RGB), geti(gl::BLEND_DST_RGB), geti(gl::BLEND_SRC_ALPHA), geti(gl::BLEND_DST_ALPHA)];
+        // Our draws use unit 0; remember what was bound there.
+        unsafe { gl::active_texture(gl::TEXTURE0) };
+        let tex0 = geti(gl::TEXTURE_BINDING_2D);
         unsafe {
             gl::use_program(self.program);
             gl::bind_vertex_array(self.vao);
             gl::uniform2f(self.view, w as f32, h as f32);
-            gl::active_texture(gl::TEXTURE0);
             gl::enable(gl::BLEND);
             // The tiles are premultiplied.
             gl::blend_func(gl::ONE, gl::ONE_MINUS_SRC_ALPHA);
@@ -204,10 +227,14 @@ impl GlOverlay {
             quad(tex, &overlay.mark_layer(idx, w, h));
         }
         unsafe {
-            gl::bind_texture(gl::TEXTURE_2D, 0);
-            gl::disable(gl::BLEND);
-            gl::bind_vertex_array(0);
-            gl::use_program(0);
+            gl::bind_texture(gl::TEXTURE_2D, tex0 as gl::GLuint);
+            gl::active_texture(unit as gl::GLenum);
+            gl::blend_func_separate(blend[0] as _, blend[1] as _, blend[2] as _, blend[3] as _);
+            if !blend_on {
+                gl::disable(gl::BLEND);
+            }
+            gl::bind_vertex_array(vao as gl::GLuint);
+            gl::use_program(program as gl::GLuint);
         }
     }
 

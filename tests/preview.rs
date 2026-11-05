@@ -160,10 +160,11 @@ fn a_plan_with_no_presets_is_an_error() {
 
 #[test]
 fn a_switch_time_that_is_not_a_whole_number_of_frames_lands_on_the_next_frame() {
-    // 8.46 s * 60 = 507.6: the render loads on frame 508, the first at or after it.
-    let mut s = state(40, &[(8.46, Cut::Soft)]);
-    assert!(s.on_frame(507).is_none());
-    assert_eq!(s.on_frame(508).unwrap().path, preset(1));
+    // 8.404 s * 60 = 504.24: the render loads on frame 505, the first at or after it.
+    // (Rounding would say 504; a value like 507.6 cannot tell round from ceil.)
+    let mut s = state(40, &[(8.404, Cut::Soft)]);
+    assert!(s.on_frame(504).is_none(), "frame 504 is before the switch");
+    assert_eq!(s.on_frame(505).unwrap().path, preset(1));
 }
 
 #[test]
@@ -251,6 +252,35 @@ fn a_plan_whose_sequence_is_not_the_pool_walked_in_order_is_refused() {
     assert!(e.0.contains("preset 1"), "{}", e.0);
 }
 
+// --- Notices: tell the user when preview can no longer be trusted to match ---------
+
+#[test]
+fn an_ordinary_switch_says_nothing() {
+    let mut s = state(40, &[(8.0, Cut::Soft)]);
+    s.on_frame(480);
+    assert!(s.take_notice().is_none());
+}
+
+#[test]
+fn a_switch_passed_while_locked_is_reported_once() {
+    let mut s = state(40, &[(8.0, Cut::Soft), (16.0, Cut::Soft)]);
+    s.lock();
+    s.on_frame(480);
+    let n = s.take_notice().expect("a locked switch is reported");
+    assert!(n.contains("locked"), "{n}");
+    assert!(s.take_notice().is_none(), "taken once");
+    s.on_frame(481);
+    assert!(s.take_notice().is_none(), "no switch, no notice");
+}
+
+#[test]
+fn switches_stalled_over_are_reported_with_their_count() {
+    let mut s = state(40, &[(8.0, Cut::Soft), (16.0, Cut::Soft), (24.0, Cut::Soft)]);
+    s.on_frame(1500);
+    let n = s.take_notice().expect("three switches passed in one frame");
+    assert!(n.contains("3 switches"), "{n}");
+}
+
 // --- Keys ---------------------------------------------------------------------------
 
 #[test]
@@ -284,7 +314,8 @@ fn l_locks_and_a_second_press_unlocks() {
 
     assert_eq!(key_action(KeyCode::KeyL, &mut s), KeyAction::Lock(false));
     assert!(!s.is_locked());
-    assert!(s.on_frame(960).is_some(), "unlocked: the schedule applies again");
+    // Switch 1 passed while locked (cursor 1), so the unlocked 16 s switch takes preset 2.
+    assert_eq!(s.on_frame(960).unwrap().path, preset(2), "unlocked: the schedule applies again, from where the cursor is");
 }
 
 #[test]

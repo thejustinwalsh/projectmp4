@@ -69,6 +69,7 @@ pub struct PreviewState {
     shown: usize,
     locked: bool,
     unloadable: Vec<bool>,
+    notice: Option<String>,
     last_smooth: bool,
     /// Direction of the latest manual step, for skipping past one that will not load.
     forward: bool,
@@ -97,6 +98,7 @@ impl PreviewState {
             shown: 0,
             locked: false,
             unloadable: vec![false; n],
+            notice: None,
             last_smooth: false,
             forward: true,
         };
@@ -147,12 +149,23 @@ impl PreviewState {
             }
         }
         self.last_smooth = self.smooth.get(segment - 1).copied().unwrap_or(false);
+        let passed = segment - self.segment;
         self.segment = segment;
         if self.locked {
+            self.notice = Some("switch passed while locked; a preset the render would skip cannot be seen from here, so later presets may differ".into());
             return None;
+        }
+        if passed > 1 {
+            self.notice = Some(format!("dropped frames passed {passed} switches without loading them; a preset the render would skip cannot be seen from here, so later presets may differ"));
         }
         self.shown = self.planned;
         Some(Load { path: self.pool[self.shown].clone(), smooth: self.last_smooth })
+    }
+
+    /// A warning that preview may no longer match the render, if one arose
+    /// since the last call (a switch passed unloaded). Taken once.
+    pub fn take_notice(&mut self) -> Option<String> {
+        self.notice.take()
     }
 
     /// projectM could not load what [`current`](Self::current) names. Sets it
@@ -546,7 +559,11 @@ impl App<'_> {
 
     fn draw(&mut self, due: Due) -> Result<()> {
         let started = Instant::now();
-        if let Some(load) = self.state.on_frame(due.frame) {
+        let load = self.state.on_frame(due.frame);
+        if let Some(n) = self.state.take_notice() {
+            eprintln!("preview: {n}");
+        }
+        if let Some(load) = load {
             self.load(load);
         }
         // The PCM since the last frame drawn, capped so a long stall does not dump a burst.
