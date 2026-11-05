@@ -115,6 +115,17 @@ impl Encoder {
             .and_then(|n| n.checked_mul(4))
             .filter(|&n| n > 0)
             .ok_or_else(|| Error::msg(format!("invalid frame size {w}x{h}")))?;
+        // The staging file is deleted before the run and renamed over `out`
+        // after it: it must be a distinct sibling of `out`, or we would destroy
+        // the previous render / fail the rename / leave the same-filesystem
+        // atomicity.
+        if part == out || part.parent() != out.parent() {
+            return Err(Error::msg(format!(
+                "staging path {} must differ from, and sit in the same directory as, output {}",
+                part.display(),
+                out.display()
+            )));
+        }
         let part = part.to_path_buf();
         // A pre-existing staging file must never be mistaken for output.
         match std::fs::remove_file(&part) {

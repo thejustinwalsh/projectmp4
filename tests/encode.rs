@@ -371,9 +371,39 @@ fn concurrent_renders_to_one_output_do_not_share_staging() {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(t.0.join("ready-A").exists() && t.0.join("ready-B").exists(), "stubs never wrote");
+    assert_eq!(parts(&out).len(), 2, "live encoders must hold distinct staging files: {:?}", parts(&out));
     ea.finish().unwrap();
     assert_eq!(std::fs::read(&out).unwrap(), b"A\n", "A published someone else's bytes");
     eb.finish().unwrap();
     assert_eq!(std::fs::read(&out).unwrap(), b"B\n");
     assert!(parts(&out).is_empty());
+}
+
+#[test]
+fn a_staging_path_that_is_the_output_is_rejected_and_the_old_video_survives() {
+    let t = Tmp::new();
+    let nothing = stub(&t.0, "nothing", "cat >/dev/null\nexit 0");
+    let out = t.0.join("o.mp4");
+    std::fs::write(&out, b"previous render").unwrap();
+    let r = Encoder::start_staged(&nothing, &out, &out, Path::new(AUDIO), 16, 16, 30, false);
+    // Destructive consequence first: the old video must be byte-identical.
+    assert_eq!(std::fs::read(&out).ok().as_deref(), Some(&b"previous render"[..]), "existing output was destroyed");
+    let msg = r.err().expect("part == out must be rejected").0.into_owned();
+    assert!(msg.contains("staging path") && msg.contains(&out.display().to_string()), "{msg}");
+}
+
+#[test]
+fn a_staging_path_in_another_directory_is_rejected() {
+    let t = Tmp::new();
+    let nothing = stub(&t.0, "nothing", "cat >/dev/null\nexit 0");
+    let sub = t.0.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let out = t.0.join("o.mp4");
+    let part = sub.join("o.mp4.part.x");
+    let msg = Encoder::start_staged(&nothing, &out, &part, Path::new(AUDIO), 16, 16, 30, false)
+        .err()
+        .expect("cross-directory staging must be rejected")
+        .0
+        .into_owned();
+    assert!(msg.contains(&part.display().to_string()) && msg.contains(&out.display().to_string()), "{msg}");
 }
