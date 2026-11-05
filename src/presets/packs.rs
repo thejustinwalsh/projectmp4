@@ -183,7 +183,7 @@ fn sweep_orphaned_parts(cache: &Path) {
 
 /// `ps -p` succeeds for any existing process regardless of owner; if `ps`
 /// itself cannot run, assume alive so the sweep errs toward keeping data.
-fn pid_alive(pid: u32) -> bool {
+pub(crate) fn pid_alive(pid: u32) -> bool {
     Command::new("ps")
         .args(["-p", &pid.to_string()])
         .stdout(std::process::Stdio::null())

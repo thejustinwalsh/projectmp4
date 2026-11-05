@@ -8,6 +8,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::thread::JoinHandle;
 
 use crate::ffi::{Error, Result};
+use crate::presets::packs::pid_alive;
 
 /// How much of ffmpeg's stderr is kept for error messages.
 const STDERR_TAIL: usize = 8 * 1024;
@@ -56,18 +57,6 @@ fn sweep_orphaned_parts(out: &Path) {
             let _ = std::fs::remove_file(e.path());
         }
     }
-}
-
-/// `ps -p` succeeds for any existing process regardless of owner; if `ps`
-/// cannot run, assume alive so the sweep errs toward keeping data.
-fn pid_alive(pid: u32) -> bool {
-    Command::new("ps")
-        .args(["-p", &pid.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(true)
 }
 
 /// The ffmpeg argument vector (without the program name).

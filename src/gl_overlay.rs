@@ -266,6 +266,11 @@ impl GlOverlay {
     }
 }
 
+/// Issues GL calls without proving the context is current. `preview.rs` calls
+/// `delete()` explicitly (after `make_current`) before this runs, so the normal
+/// path is a no-op; on early returns and unwinds the context is still alive and
+/// current. If `make_current` failed, this runs with no context, which is judged
+/// acceptable because the context is being torn down anyway.
 impl Drop for GlOverlay {
     fn drop(&mut self) {
         self.delete();
