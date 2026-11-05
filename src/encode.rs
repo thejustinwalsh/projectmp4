@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::thread::JoinHandle;
 
@@ -21,17 +22,26 @@ pub struct Encoder {
     part: PathBuf,
 }
 
+/// Private staging file next to `out` (same filesystem, so the final rename is
+/// atomic), unique per process, thread and call so concurrent renders to one
+/// output never share bytes. Only the file this run creates is ever removed.
 fn part_path(out: &Path) -> PathBuf {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
     let mut name = out.file_name().unwrap_or_default().to_os_string();
-    name.push(".part");
+    name.push(format!(
+        ".part.{}.{:?}.{}",
+        std::process::id(),
+        std::thread::current().id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     out.with_file_name(name)
 }
 
 /// The ffmpeg argument vector (without the program name).
 pub fn ffmpeg_args(out: &Path, audio: &Path, w: u32, h: u32, fps: u32, fast: bool) -> Vec<OsString> {
     let mut a: Vec<OsString> = Vec::new();
-    // `-y`: without it ffmpeg prompts on an existing output and reads the
-    // answer from stdin, which is our frame pipe.
+    // `-y`: without it, a staging file that already exists makes ffmpeg print
+    // "already exists. Exiting." and exit 0, which would pass for success.
     // `-nostats -loglevel warning`: keep stderr volume low (it is also drained
     // on a thread, so this is belt and braces).
     for s in ["-y", "-nostats", "-loglevel", "warning", "-f", "rawvideo", "-pix_fmt", "rgba", "-s"] {
@@ -84,14 +94,34 @@ impl Encoder {
         fps: u32,
         fast: bool,
     ) -> Result<Encoder> {
+        Self::start_staged(program, out, &part_path(out), audio, w, h, fps, fast)
+    }
+
+    /// `start_with_program` with a caller-chosen staging path (tests seed it).
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_staged(
+        program: &str,
+        out: &Path,
+        part: &Path,
+        audio: &Path,
+        w: u32,
+        h: u32,
+        fps: u32,
+        fast: bool,
+    ) -> Result<Encoder> {
         let frame_len = (w as usize)
             .checked_mul(h as usize)
             .and_then(|n| n.checked_mul(4))
             .filter(|&n| n > 0)
             .ok_or_else(|| Error::msg(format!("invalid frame size {w}x{h}")))?;
-        let part = part_path(out);
-        // A leftover .part from a crashed run must never be mistaken for output.
-        let _ = std::fs::remove_file(&part);
+        let part = part.to_path_buf();
+        // A pre-existing staging file must never be mistaken for output.
+        match std::fs::remove_file(&part) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(Error::msg(format!("cannot clear staging file {}: {e}", part.display()))),
+        }
         let mut child = Command::new(program)
             .args(ffmpeg_args(&part, audio, w, h, fps, fast))
             .stdin(Stdio::piped())

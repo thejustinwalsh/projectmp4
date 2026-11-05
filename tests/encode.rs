@@ -224,10 +224,14 @@ fn ffmpeg_failing_on_its_own_after_accepting_frames_surfaces() {
     assert!(msg.contains(&out.display().to_string()), "path missing: {msg}");
 }
 
-fn part_of(out: &Path) -> PathBuf {
-    let mut n = out.file_name().unwrap().to_os_string();
-    n.push(".part");
-    out.with_file_name(n)
+/// Staging files left next to `out` (`<name>.part.*`).
+fn parts(out: &Path) -> Vec<PathBuf> {
+    let prefix = format!("{}.part", out.file_name().unwrap().to_string_lossy());
+    std::fs::read_dir(out.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(&prefix))
+        .collect()
 }
 
 #[test]
@@ -243,14 +247,14 @@ fn exit_zero_without_a_fresh_output_file_is_an_error() {
     let msg = e.finish().unwrap_err().0.into_owned();
     assert!(msg.contains(&out.display().to_string()) && msg.contains("missing"), "{msg}");
     assert!(!out.exists(), "failed encode published a file");
-    assert!(!part_of(&out).exists(), ".part left behind");
+    assert!(parts(&out).is_empty(), ".part left behind");
 
-    let out = t.0.join("empty.mp4");
+    let out = t.0.join("zero-length.mp4");
     let e = Encoder::start_with_program(&empty, &out, Path::new(AUDIO), 16, 16, 30, false).unwrap();
     let msg = e.finish().unwrap_err().0.into_owned();
-    assert!(msg.contains("empty"), "{msg}");
+    assert!(msg.contains("wrote an empty"), "{msg}");
     assert!(!out.exists(), "failed encode published a file");
-    assert!(!part_of(&out).exists(), ".part left behind");
+    assert!(parts(&out).is_empty(), ".part left behind");
 
     // A previous good video survives a failed re-render untouched.
     let out = t.0.join("prev.mp4");
@@ -258,7 +262,7 @@ fn exit_zero_without_a_fresh_output_file_is_an_error() {
     let e = Encoder::start_with_program(&nothing, &out, Path::new(AUDIO), 16, 16, 30, false).unwrap();
     assert!(e.finish().is_err());
     assert_eq!(std::fs::read(&out).unwrap(), b"old video");
-    assert!(!part_of(&out).exists(), ".part left behind");
+    assert!(parts(&out).is_empty(), ".part left behind");
 }
 
 #[test]
@@ -270,7 +274,7 @@ fn success_publishes_the_part_at_the_final_path() {
     assert!(!out.exists());
     e.finish().unwrap();
     assert_eq!(std::fs::read(&out).unwrap(), b"video\n");
-    assert!(!part_of(&out).exists());
+    assert!(parts(&out).is_empty());
 }
 
 #[test]
@@ -283,7 +287,7 @@ fn failure_after_frames_leaves_neither_part_nor_output() {
         e.write_frame(&grey_frame(320, 180)).unwrap();
     }
     let _ = first_error(e, 50);
-    assert!(!out.exists() && !part_of(&out).exists());
+    assert!(!out.exists() && parts(&out).is_empty());
 }
 
 #[test]
@@ -294,14 +298,14 @@ fn dropping_an_unfinished_encoder_removes_the_part() {
     let e = Encoder::start_with_program(&program, &out, Path::new(AUDIO), 16, 16, 30, false).unwrap();
     // Wait for the stub to create the .part before dropping.
     for _ in 0..200 {
-        if part_of(&out).exists() {
+        if !parts(&out).is_empty() {
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert!(part_of(&out).exists(), "stub never created the .part");
+    assert!(!parts(&out).is_empty(), "stub never created the .part");
     drop(e);
-    assert!(!part_of(&out).exists() && !out.exists());
+    assert!(parts(&out).is_empty() && !out.exists());
 }
 
 #[test]
@@ -313,4 +317,63 @@ fn absurd_dimensions_are_rejected_not_wrapped() {
         let e = Encoder::start(&t.0.join("z.mp4"), Path::new(AUDIO), w, h, 30, false).err().expect("zero size must be rejected");
         assert!(e.0.contains(&format!("{w}x{h}")), "{}", e.0);
     }
+}
+
+#[test]
+fn a_stale_staging_file_is_never_published() {
+    let t = Tmp::new();
+    let nothing = stub(&t.0, "nothing", "cat >/dev/null\nexit 0");
+    let out = t.0.join("o.mp4");
+    let part = t.0.join("o.mp4.part.stale");
+    std::fs::write(&part, b"stale bytes").unwrap();
+    let e = Encoder::start_staged(&nothing, &out, &part, Path::new(AUDIO), 16, 16, 30, false).unwrap();
+    assert!(e.finish().is_err(), "stale staging file passed for output");
+    assert!(!out.exists(), "stale bytes published");
+    assert!(!part.exists());
+}
+
+#[test]
+fn an_unremovable_staging_path_is_an_error_not_ignored() {
+    let t = Tmp::new();
+    let nothing = stub(&t.0, "nothing", "cat >/dev/null\nexit 0");
+    let out = t.0.join("o.mp4");
+    // A non-empty directory cannot be removed with remove_file.
+    let part = t.0.join("o.mp4.part.dir");
+    std::fs::create_dir(&part).unwrap();
+    std::fs::write(part.join("x"), b"x").unwrap();
+    let r = Encoder::start_staged(&nothing, &out, &part, Path::new(AUDIO), 16, 16, 30, false);
+    let msg = r.err().expect("removal failure must be reported").0.into_owned();
+    assert!(msg.contains("o.mp4.part.dir"), "{msg}");
+    assert!(!out.exists());
+}
+
+/// Two live encoders to one output each stage privately: finishing one can
+/// only publish its own bytes.
+#[test]
+fn concurrent_renders_to_one_output_do_not_share_staging() {
+    let t = Tmp::new();
+    let dir = t.0.display();
+    let mk = |tag: &str| {
+        stub(
+            &t.0,
+            tag,
+            &format!("echo {tag} > \"$OUT\"\ntouch '{dir}/ready-{tag}'\ncat >/dev/null\nexit 0"),
+        )
+    };
+    let (pa, pb) = (mk("A"), mk("B"));
+    let out = t.0.join("o.mp4");
+    let ea = Encoder::start_with_program(&pa, &out, Path::new(AUDIO), 16, 16, 30, false).unwrap();
+    let eb = Encoder::start_with_program(&pb, &out, Path::new(AUDIO), 16, 16, 30, false).unwrap();
+    for _ in 0..500 {
+        if t.0.join("ready-A").exists() && t.0.join("ready-B").exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(t.0.join("ready-A").exists() && t.0.join("ready-B").exists(), "stubs never wrote");
+    ea.finish().unwrap();
+    assert_eq!(std::fs::read(&out).unwrap(), b"A\n", "A published someone else's bytes");
+    eb.finish().unwrap();
+    assert_eq!(std::fs::read(&out).unwrap(), b"B\n");
+    assert!(parts(&out).is_empty());
 }
