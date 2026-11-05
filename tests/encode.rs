@@ -162,11 +162,13 @@ fn ffmpeg_rejecting_the_output_surfaces_its_stderr() {
 
 /// Write an executable `sh` stub standing in for ffmpeg. A watchdog kills it
 /// after 20 s so a failed run cannot leave it behind; fds are redirected so the
-/// watchdog does not hold the parent's pipes open.
-fn stub(dir: &Path, body: &str) -> String {
-    let path = dir.join("ffmpeg-stub");
+/// watchdog does not hold the parent's pipes open. On normal exit the stub
+/// kills its own watchdog, so the pid is never signalled after it is released.
+/// `$OUT` is the last argument (the `.part` path).
+fn stub(dir: &Path, name: &str, body: &str) -> String {
+    let path = dir.join(name);
     let script = format!(
-        "#!/bin/sh\n(sleep 20 >/dev/null 2>&1 </dev/null && kill -9 $$) >/dev/null 2>&1 </dev/null &\n{body}\n"
+        "#!/bin/sh\n(sleep 20 >/dev/null 2>&1 </dev/null && kill -9 $$) >/dev/null 2>&1 </dev/null &\nWD=$!\ntrap 'kill $WD 2>/dev/null' EXIT\nfor OUT; do :; done\n{body}\n"
     );
     std::fs::write(&path, script).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -180,6 +182,7 @@ fn stderr_is_drained_and_only_its_tail_is_kept() {
     let t = Tmp::new();
     let program = stub(
         &t.0,
+        "s",
         "echo FIRST-MARKER >&2\nyes xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx | head -c 260000 >&2\necho >&2\necho LAST-MARKER >&2\ncat >/dev/null\nexit 1",
     );
     let out = t.0.join("o.mp4");
@@ -209,7 +212,7 @@ fn stderr_is_drained_and_only_its_tail_is_kept() {
 #[test]
 fn ffmpeg_failing_on_its_own_after_accepting_frames_surfaces() {
     let t = Tmp::new();
-    let program = stub(&t.0, "head -c 460800 >/dev/null\necho 'stub: boom' >&2\nexit 3");
+    let program = stub(&t.0, "s", "head -c 460800 >/dev/null\necho 'stub: boom' >&2\nexit 3");
     let out = t.0.join("o.mp4");
     let mut e = Encoder::start_with_program(&program, &out, Path::new(AUDIO), 320, 180, 30, false).unwrap();
     for i in 0..2 {
@@ -221,28 +224,84 @@ fn ffmpeg_failing_on_its_own_after_accepting_frames_surfaces() {
     assert!(msg.contains(&out.display().to_string()), "path missing: {msg}");
 }
 
+fn part_of(out: &Path) -> PathBuf {
+    let mut n = out.file_name().unwrap().to_os_string();
+    n.push(".part");
+    out.with_file_name(n)
+}
+
 #[test]
 fn exit_zero_without_a_fresh_output_file_is_an_error() {
     let t = Tmp::new();
-    let program = stub(&t.0, "cat >/dev/null\nexit 0");
-    // Missing output.
+    // Exit 0 having written nothing / an empty file.
+    let nothing = stub(&t.0, "nothing", "cat >/dev/null\nexit 0");
+    let empty = stub(&t.0, "empty", "cat >/dev/null\n: > \"$OUT\"\nexit 0");
+
     let out = t.0.join("none.mp4");
-    let mut e = Encoder::start_with_program(&program, &out, Path::new(AUDIO), 16, 16, 30, false).unwrap();
+    let mut e = Encoder::start_with_program(&nothing, &out, Path::new(AUDIO), 16, 16, 30, false).unwrap();
     e.write_frame(&grey_frame(16, 16)).unwrap();
     let msg = e.finish().unwrap_err().0.into_owned();
     assert!(msg.contains(&out.display().to_string()) && msg.contains("missing"), "{msg}");
-    // Empty output.
-    let empty = t.0.join("empty.mp4");
-    std::fs::write(&empty, b"").unwrap();
-    let e = Encoder::start_with_program(&program, &empty, Path::new(AUDIO), 16, 16, 30, false).unwrap();
+    assert!(!out.exists(), "failed encode published a file");
+    assert!(!part_of(&out).exists(), ".part left behind");
+
+    let out = t.0.join("empty.mp4");
+    let e = Encoder::start_with_program(&empty, &out, Path::new(AUDIO), 16, 16, 30, false).unwrap();
     let msg = e.finish().unwrap_err().0.into_owned();
     assert!(msg.contains("empty"), "{msg}");
-    // Stale output left untouched, as ffmpeg does without -y.
-    let stale = t.0.join("stale.mp4");
-    std::fs::write(&stale, b"old video").unwrap();
-    let e = Encoder::start_with_program(&program, &stale, Path::new(AUDIO), 16, 16, 30, false).unwrap();
-    let msg = e.finish().unwrap_err().0.into_owned();
-    assert!(msg.contains("stale") && msg.contains(&stale.display().to_string()), "{msg}");
+    assert!(!out.exists(), "failed encode published a file");
+    assert!(!part_of(&out).exists(), ".part left behind");
+
+    // A previous good video survives a failed re-render untouched.
+    let out = t.0.join("prev.mp4");
+    std::fs::write(&out, b"old video").unwrap();
+    let e = Encoder::start_with_program(&nothing, &out, Path::new(AUDIO), 16, 16, 30, false).unwrap();
+    assert!(e.finish().is_err());
+    assert_eq!(std::fs::read(&out).unwrap(), b"old video");
+    assert!(!part_of(&out).exists(), ".part left behind");
+}
+
+#[test]
+fn success_publishes_the_part_at_the_final_path() {
+    let t = Tmp::new();
+    let ok = stub(&t.0, "ok", "cat >/dev/null\necho video > \"$OUT\"\nexit 0");
+    let out = t.0.join("o.mp4");
+    let e = Encoder::start_with_program(&ok, &out, Path::new(AUDIO), 16, 16, 30, false).unwrap();
+    assert!(!out.exists());
+    e.finish().unwrap();
+    assert_eq!(std::fs::read(&out).unwrap(), b"video\n");
+    assert!(!part_of(&out).exists());
+}
+
+#[test]
+fn failure_after_frames_leaves_neither_part_nor_output() {
+    let t = Tmp::new();
+    let program = stub(&t.0, "s", "echo partial > \"$OUT\"\nhead -c 460800 >/dev/null\nexit 3");
+    let out = t.0.join("o.mp4");
+    let mut e = Encoder::start_with_program(&program, &out, Path::new(AUDIO), 320, 180, 30, false).unwrap();
+    for _ in 0..2 {
+        e.write_frame(&grey_frame(320, 180)).unwrap();
+    }
+    let _ = first_error(e, 50);
+    assert!(!out.exists() && !part_of(&out).exists());
+}
+
+#[test]
+fn dropping_an_unfinished_encoder_removes_the_part() {
+    let t = Tmp::new();
+    let program = stub(&t.0, "s", "echo partial > \"$OUT\"\ncat >/dev/null");
+    let out = t.0.join("o.mp4");
+    let e = Encoder::start_with_program(&program, &out, Path::new(AUDIO), 16, 16, 30, false).unwrap();
+    // Wait for the stub to create the .part before dropping.
+    for _ in 0..200 {
+        if part_of(&out).exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(part_of(&out).exists(), "stub never created the .part");
+    drop(e);
+    assert!(!part_of(&out).exists() && !out.exists());
 }
 
 #[test]
@@ -250,4 +309,8 @@ fn absurd_dimensions_are_rejected_not_wrapped() {
     let t = Tmp::new();
     let r = Encoder::start(&t.0.join("o.mp4"), Path::new(AUDIO), u32::MAX, u32::MAX, 30, false);
     assert!(r.is_err());
+    for (w, h) in [(0, 1080), (1920, 0), (0, 0)] {
+        let e = Encoder::start(&t.0.join("z.mp4"), Path::new(AUDIO), w, h, 30, false).err().expect("zero size must be rejected");
+        assert!(e.0.contains(&format!("{w}x{h}")), "{}", e.0);
+    }
 }

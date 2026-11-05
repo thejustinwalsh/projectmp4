@@ -2,8 +2,7 @@
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
-use std::path::Path;
-use std::time::SystemTime;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::thread::JoinHandle;
 
@@ -17,9 +16,15 @@ pub struct Encoder {
     stdin: Option<ChildStdin>,
     stderr: Option<JoinHandle<Vec<u8>>>,
     frame_len: usize,
-    out: String,
-    /// Modification time of an output that already existed at start.
-    prior_mtime: Option<SystemTime>,
+    out: PathBuf,
+    /// ffmpeg writes here; only a verified success renames it onto `out`.
+    part: PathBuf,
+}
+
+fn part_path(out: &Path) -> PathBuf {
+    let mut name = out.file_name().unwrap_or_default().to_os_string();
+    name.push(".part");
+    out.with_file_name(name)
 }
 
 /// The ffmpeg argument vector (without the program name).
@@ -56,6 +61,10 @@ pub fn ffmpeg_args(out: &Path, audio: &Path, w: u32, h: u32, fps: u32, fast: boo
     for s in ["-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "256k", "-movflags", "+faststart", "-shortest"] {
         a.push(s.into());
     }
+    // `.part` gives ffmpeg no muxer to infer, so name it.
+    for s in ["-f", "mp4"] {
+        a.push(s.into());
+    }
     a.push(out.into());
     a
 }
@@ -80,9 +89,11 @@ impl Encoder {
             .and_then(|n| n.checked_mul(4))
             .filter(|&n| n > 0)
             .ok_or_else(|| Error::msg(format!("invalid frame size {w}x{h}")))?;
-        let prior_mtime = std::fs::metadata(out).and_then(|m| m.modified()).ok();
+        let part = part_path(out);
+        // A leftover .part from a crashed run must never be mistaken for output.
+        let _ = std::fs::remove_file(&part);
         let mut child = Command::new(program)
-            .args(ffmpeg_args(out, audio, w, h, fps, fast))
+            .args(ffmpeg_args(&part, audio, w, h, fps, fast))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -113,8 +124,8 @@ impl Encoder {
             stdin,
             stderr: Some(stderr),
             frame_len,
-            out: out.display().to_string(),
-            prior_mtime,
+            out: out.to_path_buf(),
+            part,
         })
     }
 
@@ -153,19 +164,25 @@ impl Encoder {
         let status = child.wait().map_err(|e| Error::msg(format!("waiting for ffmpeg: {e}")))?;
         let tail = self.stderr.take().and_then(|t| t.join().ok()).unwrap_or_default();
         if status.success() {
-            // ffmpeg exits 0 after failing to open an existing output without
-            // `-y`, leaving the old file in place: exit status alone is not
-            // proof a video was produced.
-            return match std::fs::metadata(&self.out) {
-                Ok(m) if m.len() > 0 && (self.prior_mtime.is_none() || m.modified().ok() != self.prior_mtime) => Ok(()),
-                Ok(m) if m.len() == 0 => Err(Error::msg(format!("ffmpeg exited 0 but {} is empty", self.out))),
-                Ok(_) => Err(Error::msg(format!("ffmpeg exited 0 but {} was not rewritten (stale output)", self.out))),
-                Err(e) => Err(Error::msg(format!("ffmpeg exited 0 but {} is missing: {e}", self.out))),
+            // Exit 0 is not proof of a video (ffmpeg exits 0 after failing to
+            // open an existing output). The `.part` is always created fresh,
+            // so existence and a non-zero length are enough.
+            let shown = self.out.display();
+            let verdict = match std::fs::metadata(&self.part) {
+                Ok(m) if m.len() > 0 => std::fs::rename(&self.part, &self.out)
+                    .map_err(|e| Error::msg(format!("cannot publish {shown}: {e}"))),
+                Ok(_) => Err(Error::msg(format!("ffmpeg exited 0 but wrote an empty {shown}"))),
+                Err(e) => Err(Error::msg(format!("ffmpeg exited 0 but wrote no {shown}: missing: {e}"))),
             };
+            if verdict.is_err() {
+                let _ = std::fs::remove_file(&self.part);
+            }
+            return verdict;
         }
+        let _ = std::fs::remove_file(&self.part);
         Err(Error::msg(format!(
             "ffmpeg writing {} exited with {status}: {}",
-            self.out,
+            self.out.display(),
             String::from_utf8_lossy(&tail).trim()
         )))
     }
@@ -178,5 +195,7 @@ impl Drop for Encoder {
             let _ = c.kill();
             let _ = c.wait();
         }
+        // No-op after a successful rename.
+        let _ = std::fs::remove_file(&self.part);
     }
 }
