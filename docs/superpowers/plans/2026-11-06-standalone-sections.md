@@ -79,12 +79,37 @@ That is why the reference runs the whole track in one pass and why it needs ~1 G
 
 ## Ground truth available on disk (read-only)
 
-- `~/Library/Application Support/agent-deck/sections/jobs/artifacts/` — content-addressed
-  results carrying `{"result":{"frames":N,"segments":[{"startSeconds","endSeconds","label",
-  "meanClassProbability"}]}}` and the `stemBundleHash` that produced them.
-- `~/Library/Application Support/agent-deck/stems/bundles/` — 21 htdemucs bundles, the exact
-  four-stem audio the cached results were computed from.
-- `sections/jobs/journal.json` — maps job ids to plans and stage algorithms.
+Better than first assessed. `~/Library/Application Support/agent-deck/sections/jobs/artifacts/`
+holds, as content-addressed files:
+
+1. **20 labeled section results** — `{"result":{"frames":N,"inputKind":
+   "four-demixed-stems-spectrogram","segments":[{"startSeconds","endSeconds","label",
+   "meanClassProbability"}]}}`, plus the `stemBundleHash` that produced each. Between 2 and 17
+   segments per track, 1,200 to 32,880 frames (12 s to 5.5 minutes).
+2. **The 20 reference spectrograms those results were computed from** — raw `[4, frames, 81]`
+   contiguous f32, one per result. They are unlabelled blobs, but each is identifiable
+   arithmetically: a tensor for a result of `N` frames is **exactly `N * 4 * 81 * 4` bytes**, and
+   that size uniquely matches one file per result. Verified: all 20 pair cleanly. The `.stage.json`
+   files carry the `units[].sha256` linkage if you want to confirm a pairing rather than rely on
+   size alone — do confirm it, since size is a strong but not infallible key.
+3. **21 htdemucs stem bundles** under `stems/bundles/` — the audio those spectrograms came from.
+4. `sections/jobs/journal.json` — job ids to plans and stage algorithms.
+
+**This decouples the three parity gates completely**, which is worth more than the extra tracks:
+
+| task | oracle | isolates |
+|---|---|---|
+| 18 (spectrogram) | stems -> my tensor vs the **cached tensor** | resampler + STFT + filter bank, nothing else |
+| 19 (forward pass) | **cached tensor** -> my segments vs cached segments | the model alone — no stems, no spectrogram, no resampler |
+| 20 (front ends) | my 4 channels -> model -> segments vs cached segments | the front end alone |
+
+So Task 19 needs no audio, no stems and no working spectrogram: read a cached tensor, run the
+model, compare segments. If its gate fails, the model is wrong — the finding cannot be smeared
+across three components. Build Task 19's gate on the cached tensors even though Task 18 will exist
+by then, and do not substitute your own spectrogram for the cached one there.
+
+Nothing under `~/Library/Application Support/agent-deck/` may be written, created, moved or
+deleted. It is the user's own data and it is the only copy of this ground truth.
 
 That pairing is what makes Tasks 18–20 measurable rather than asserted.
 
@@ -255,15 +280,17 @@ The first is the one that matters: a numerical parity gate against agent-deck's 
 
 ```rust
 #[test]
-fn bands_match_the_reference_implementation_on_real_stems() {
-    // Pick one bundle from ~/Library/Application Support/agent-deck/stems/bundles/ whose
-    // manifest resolves four stems, decode them to 44.1k mono f32, and run stack().
-    // Oracle: run agent-deck's own structure worker over the same stems.
-    //   /Users/tjw/Developer/agent-deck/.tools/... (locate the built structure_worker; if no
-    //   binary exists, build it in a scratch dir OUTSIDE both repos with cmake, or skip with
-    //   #[ignore] and say so in the report — do not weaken the tolerance instead).
-    // Compare element-wise.
+fn bands_match_the_cached_reference_spectrogram_on_real_stems() {
+    // No C++ build is needed. The oracle is already on disk: see "Ground truth" above.
+    // Pick a result artifact, find its stem bundle by stemBundleHash, and find its reference
+    // tensor by size (frames * 4 * 81 * 4 bytes), confirming the pairing via .stage.json.
+    // Prefer the SMALLEST pair (1200 frames, 1,555,200 bytes) so the test stays fast.
+    // Decode the bundle's four stems, resample 48k -> 44.1k, run stack(), compare element-wise
+    // against the cached f32 tensor.
     assert!(max_abs_diff < 1e-4, "spectrogram diverges from the reference: {max_abs_diff}");
+    // Also assert the frame count matches exactly: a resampler off by one sample shifts
+    // everything and would otherwise show up only as a large diff with no cause attached.
+    assert_eq!(my_frames, cached_frames);
 }
 
 #[test]
@@ -365,10 +392,12 @@ One test decides this task. It is an end-to-end parity gate, and nothing weaker 
 
 ```rust
 #[test]
-fn segments_match_agent_decks_cached_result_for_the_same_stems() {
-    // For every artifact under sections/jobs/artifacts/ that parses as a result with
-    // segments and a stemBundleHash whose bundle is present:
-    //   decode the bundle's four stems -> stack() -> predict() -> postprocess()
+fn segments_match_agent_decks_cached_result_from_the_cached_spectrogram() {
+    // Feed the CACHED [4,frames,81] tensor directly — not your own spectrogram, and not stems.
+    // This isolates the model: a failure here is the forward pass, nothing else.
+    // All 20 result/tensor pairs are available; run at least three, including the smallest
+    // (1200 frames) and the largest (32880 frames, which also exercises the memory ceiling).
+    //   read cached tensor -> predict() -> postprocess()
     // Assert, against the cached segments:
     //   - the same number of segments
     //   - identical labels, in order
