@@ -35,3 +35,8 @@ bindgen = "0.71"
 [profile.dev.package."*"]
 opt-level = 3
 
+
+# The section model's forward pass (~35 G multiply-adds per track) is unusably slow
+# unoptimised, and the parity gate runs it on 20 tracks in `cargo test`.
+[profile.dev.package.projectmp4]
+opt-level = 3
