@@ -6,7 +6,7 @@
 use crate::audio::analysis::DEFAULT_MODELS;
 use crate::audio::normalise::{wav_frames, PIPELINE_RATE};
 use crate::audio::timeline::{plan_switches_reporting, Cut, SwitchPoint};
-use crate::audio::{analyse_outcome, normalise, Analysis, Driver, DriverKind, Outcome};
+use crate::audio::{analyse_outcome, normalise, Analysis, Driver, Outcome};
 use crate::encode::{video_bitrate_kbps, Target, AUDIO_KBPS};
 use crate::ffi::{Error, Result};
 use crate::presets::{default_cache_dir, Manifest, Packs};
@@ -38,8 +38,6 @@ pub struct RenderArgs {
     /// Explicit `.milk` files. When non-empty they replace the profile's list.
     pub presets: Vec<PathBuf>,
     pub fps: u32,
-    /// `None` prefers stems and falls back to the mix.
-    pub driver: Option<DriverKind>,
     pub watermark_style: MarkStyle,
     /// Watermark does not follow the bass.
     pub static_overlay: bool,
@@ -70,7 +68,6 @@ impl RenderArgs {
             profile: DEFAULT_PROFILE.into(),
             presets: Vec::new(),
             fps: 60,
-            driver: None,
             watermark_style: MarkStyle::Word,
             static_overlay: false,
             fast: false,
@@ -106,7 +103,6 @@ pub struct RenderPlan {
     /// `ceil(duration * fps)`.
     pub total_frames: u64,
     pub bpm: f32,
-    pub driver: DriverKind,
     /// Overlay and encode settings, recorded so a dumped plan replays as it was previewed.
     pub watermark_style: MarkStyle,
     pub static_overlay: bool,
@@ -141,7 +137,6 @@ impl RenderPlan {
             "limit_seconds": self.limit_seconds,
             "total_frames": self.total_frames,
             "bpm": self.bpm,
-            "driver": match self.driver { DriverKind::Stems => "stems", DriverKind::Mix => "mix" },
             "watermark_style": match self.watermark_style { MarkStyle::Word => "word", MarkStyle::Sigil => "sigil" },
             "static_overlay": self.static_overlay,
             "fast": self.fast,
@@ -208,11 +203,6 @@ impl RenderPlan {
             duration: v.get("duration").and_then(Value::as_f64).ok_or_else(|| bad("duration"))?,
             total_frames: v.get("total_frames").and_then(Value::as_u64).ok_or_else(|| bad("total_frames"))?,
             bpm: v.get("bpm").and_then(Value::as_f64).ok_or_else(|| bad("bpm"))? as f32,
-            driver: match str_of("driver").as_deref() {
-                Some("stems") => DriverKind::Stems,
-                Some("mix") => DriverKind::Mix,
-                _ => return Err(bad("driver")),
-            },
             // Fields added after the first version default when absent, so an
             // older plan still loads. Adding a field must never invalidate a plan.
             watermark_style: match str_of("watermark_style").as_deref() {
@@ -321,10 +311,10 @@ fn prepare_with(args: &RenderArgs, tmp: TempDir, src: crate::audio::Source) -> R
         Outcome::Beats(a) => (a, false),
         Outcome::NoBeats(why) => {
             eprintln!("render: {why}; switching presets on a fixed {MIN_GAP} s grid");
-            (Analysis { bpm: 0.0, beats: Vec::new(), downbeats: Vec::new(), duration: wav_secs, from_cache: false }, true)
+            (Analysis { bpm: 0.0, beats: Vec::new(), downbeats: Vec::new(), duration: wav_secs }, true)
         }
     };
-    let driver = Driver::load(&src, args.driver)?;
+    let driver = Driver::load(&src)?;
     let (mut switches, fill) = plan_switches_reporting(&analysis, &driver, MIN_GAP, DROP_GAP);
     if !beatless {
         if let Some(n) = fill.notice(wav_secs) {
@@ -340,9 +330,8 @@ fn prepare_with(args: &RenderArgs, tmp: TempDir, src: crate::audio::Source) -> R
     let (pool, textures) = resolve_pool(args)?;
 
     // The audio the encoder muxes (and `-shortest` trims to) is the normalised
-    // WAV, so its length, not the stems', sets the video length. Stems can be
-    // shorter (ravezilla: 8,277,120 vs 8,277,768 frames) or, in principle,
-    // longer; the driver reads zeros past its end.
+    // WAV, and the driver is decoded from that same WAV, so its length sets the
+    // video length.
     // The tiny subtraction keeps an exact multiple (12.0 s * 60) from rounding up a frame.
     let total_frames = (shown * args.fps as f64 - 1e-9).ceil().max(1.0) as u64;
     // A switch the render never reaches is not part of the plan.
@@ -359,7 +348,6 @@ fn prepare_with(args: &RenderArgs, tmp: TempDir, src: crate::audio::Source) -> R
         limit_seconds: args.limit_seconds,
         total_frames,
         bpm: analysis.bpm,
-        driver: driver.kind,
         watermark_style: args.watermark_style,
         static_overlay: args.static_overlay,
         fast: args.fast,

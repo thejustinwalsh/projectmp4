@@ -483,7 +483,7 @@ mod tests {
             let v = if i < rate { 0.8 * (std::f32::consts::TAU * 100.0 * i as f32 / rate as f32).sin() } else { 0.0 };
             pcm.extend_from_slice(&[v, v]);
         }
-        let d = Driver::new(crate::audio::DriverKind::Mix, pcm);
+        let d = Driver::new(pcm);
         for fps in [10u32, 60, 240] {
             let out = bass_per_frame(&d, fps, 2 * fps as u64);
             assert!(out[fps as usize / 2] > 0.9, "{fps} fps: not at full level during the burst: {}", out[fps as usize / 2]);

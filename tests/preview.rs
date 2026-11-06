@@ -3,7 +3,6 @@
 //! buffer. The window, the GL context and the output device are not tested.
 
 use projectmp4::audio::timeline::{Cut, SwitchPoint};
-use projectmp4::audio::DriverKind;
 use projectmp4::preview::{fill_output, heard_secs, key_action, KeyAction, Pacer, PreviewState};
 use winit::keyboard::KeyCode;
 use projectmp4::render::plan::RenderPlan;
@@ -29,7 +28,6 @@ fn plan_of(pool_len: usize, switches: &[(f64, Cut)], fps: u32) -> RenderPlan {
         limit_seconds: None,
         total_frames: 60 * fps as u64,
         bpm: 120.0,
-        driver: DriverKind::Mix,
         watermark_style: MarkStyle::Word,
         static_overlay: false,
         fast: false,
@@ -498,4 +496,19 @@ fn a_dumped_plan_records_and_replays_its_size_target() {
     v.as_object_mut().unwrap().remove("bitrate_kbps");
     let old = RenderPlan::from_json(&v.to_string()).unwrap();
     assert_eq!((old.target, old.bitrate_kbps), (projectmp4::encode::Target::None, None));
+}
+
+#[test]
+fn a_plan_that_still_carries_a_driver_key_loads_and_the_key_is_ignored() {
+    // Plans written before the driver was fixed to the mix recorded "stems" or "mix".
+    // Either must load; neither changes the plan, and a re-dump no longer writes it.
+    let p = plan_of(3, &[], 60);
+    for old in ["stems", "mix", "something-unknown"] {
+        let mut v: serde_json::Value = serde_json::from_str(&p.to_json()).unwrap();
+        assert!(v.as_object_mut().unwrap().get("driver").is_none(), "a dump still writes \"driver\"");
+        v.as_object_mut().unwrap().insert("driver".into(), old.into());
+        let back = RenderPlan::from_json(&v.to_string()).unwrap_or_else(|e| panic!("\"driver\": {old:?}: {e}"));
+        assert_eq!(back, p, "\"driver\": {old:?}");
+        assert!(!back.to_json().contains("\"driver\""));
+    }
 }

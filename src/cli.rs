@@ -1,6 +1,5 @@
 //! Command line: `init`, `rank`, `preview`, `render`.
 
-use crate::audio::DriverKind;
 use crate::encode::Target;
 use crate::ffi::{Error, Result};
 use crate::presets::{default_cache_dir, Manifest, Packs};
@@ -54,9 +53,6 @@ struct PlanCmd {
     /// 10 fps and roughly 4x faster at 240 (direction and rough size, not measured).
     #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(10..=240))]
     fps: u32,
-    /// Audio that drives the visuals: stems (falls back to mix) or mix.
-    #[arg(long, value_parser = parse_driver)]
-    driver: Option<DriverKind>,
     /// Use only the first N seconds.
     #[arg(long, value_parser = parse_limit)]
     limit_seconds: Option<f64>,
@@ -92,7 +88,6 @@ impl PlanCmd {
         a.profile = self.profile;
         a.presets = self.preset;
         a.fps = self.fps;
-        a.driver = self.driver;
         a.limit_seconds = self.limit_seconds;
         a.title = self.title;
         a.artist = self.artist;
@@ -138,14 +133,6 @@ fn parse_flash_rate(s: &str) -> std::result::Result<f32, String> {
 
 fn parse_target(s: &str) -> std::result::Result<Target, String> {
     Target::parse(s).map_err(|e| e.0.into_owned())
-}
-
-fn parse_driver(s: &str) -> std::result::Result<DriverKind, String> {
-    match s {
-        "stems" => Ok(DriverKind::Stems),
-        "mix" => Ok(DriverKind::Mix),
-        _ => Err("expected stems or mix".into()),
-    }
 }
 
 fn parse_style(s: &str) -> std::result::Result<MarkStyle, String> {

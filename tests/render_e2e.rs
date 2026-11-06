@@ -525,11 +525,13 @@ fn preset_switches_land_on_their_planned_frames() {
     a.flash_guard = false;
     let r = render_report(&a).unwrap();
 
-    // The first 40 s of ravezilla hold three Soft switches then a Hard one, so
-    // both kinds are exercised. If the analysis ever changes, this says so.
+    // The first 40 s of ravezilla hold two Soft switches then two Hard ones, so
+    // both kinds are exercised. If the analysis changes, this says so. (Which
+    // switches are Hard is read from the full mix, the only driver there is;
+    // when stems from a sibling application could drive it, it was Soft x3 then Hard.)
     let planned: Vec<_> = r.plan.switches.iter().filter(|s| s.t < 40.0).collect();
     let kinds: Vec<Cut> = planned.iter().map(|s| s.cut).collect();
-    assert_eq!(kinds, [Cut::Soft, Cut::Soft, Cut::Soft, Cut::Hard]);
+    assert_eq!(kinds, [Cut::Soft, Cut::Soft, Cut::Hard, Cut::Hard]);
     let want_frames: Vec<u64> = planned.iter().map(|s| (s.t * FPS as f64).ceil() as u64).collect();
 
     // What the loop did: each switch loaded on the first frame at or after its
@@ -540,16 +542,17 @@ fn preset_switches_land_on_their_planned_frames() {
     assert_eq!(presets, [&red, &blue, &red, &blue, &red]);
     // The flag actually handed to projectM: smooth for Soft, hard for Hard and the opening.
     let smooth: Vec<bool> = r.loads.iter().map(|l| l.smooth).collect();
-    assert_eq!(smooth, [false, true, true, true, false]);
+    assert_eq!(smooth, [false, true, true, false, false]);
     let cuts: Vec<Option<Cut>> = r.loads.iter().map(|l| l.cut).collect();
-    assert_eq!(cuts, [None, Some(Cut::Soft), Some(Cut::Soft), Some(Cut::Soft), Some(Cut::Hard)]);
+    assert_eq!(cuts, [None, Some(Cut::Soft), Some(Cut::Soft), Some(Cut::Hard), Some(Cut::Hard)]);
 
     // What the viewer sees. A Hard cut is instant: the frame before still shows
     // the old preset, the frame itself the new one. Each Soft cut is the old
     // preset up to the frame before it (the blend then runs for seconds).
-    let (s1, s2, s3, hard) = (want_frames[0], want_frames[1], want_frames[2], want_frames[3]);
-    let seen = colours_at(&r.out, &[s1 - 1, s2 - 1, s3 - 1, hard - 1, hard]);
-    assert_eq!(seen, ["red", "blue", "red", "blue", "red"], "frames {:?}", [s1 - 1, s2 - 1, s3 - 1, hard - 1, hard]);
+    let (s1, s2, h1, h2) = (want_frames[0], want_frames[1], want_frames[2], want_frames[3]);
+    let probe = [s1 - 1, s2 - 1, h1 - 1, h1, h2 - 1, h2];
+    let seen = colours_at(&r.out, &probe);
+    assert_eq!(seen, ["red", "blue", "red", "blue", "blue", "red"], "frames {probe:?}");
 
     // A Soft cut blends for about three seconds, through a transition effect
     // projectM picks at random each time, so the blend's exact colours are not
@@ -560,7 +563,7 @@ fn preset_switches_land_on_their_planned_frames() {
     // through near-black (measured: (0,0,15)), so brightness is not bounded.
     // Measured counts over 9 draws: 7 to 33 per switch; the bound is 4.
     // A switch handed to projectM without `smooth` would give none.
-    for (&sf, new_colour) in want_frames[..3].iter().zip(["blue", "red", "blue"]) {
+    for (&sf, new_colour) in want_frames[..2].iter().zip(["blue", "red"]) {
         let at: Vec<u64> = (0..200).map(|k| sf + k).collect();
         // The window ends on the pure new colour: the blend completed.
         assert_eq!(colours_at(&r.out, &[sf + 199]), [new_colour], "blend after frame {sf} did not finish");
@@ -583,17 +586,16 @@ fn preset_switches_land_on_their_planned_frames() {
     }
     // A Hard cut is instant and complete: every sampled frame for 60 frames is
     // fully the new colour. A smooth flag on it would show a blend.
-    let at: Vec<u64> = (0..20).map(|k| hard + 3 * k).collect();
-    assert!(colours_at(&r.out, &at).iter().all(|&c| c == "red"), "{:?}", colours_at(&r.out, &at));
+    for (hard, colour) in [(h1, "blue"), (h2, "red")] {
+        let at: Vec<u64> = (0..20).map(|k| hard + 3 * k).collect();
+        assert!(colours_at(&r.out, &at).iter().all(|&c| c == colour), "{:?}", colours_at(&r.out, &at));
+    }
 }
 
 #[test]
-fn stems_backed_render_length_follows_the_audio_it_is_muxed_with() {
-    // ravezilla has stems in the agent-deck cache. They are 8,277,120 frames; the
-    // WAV that ffmpeg muxes (and `-shortest` trims to) is 8,277,768. The video
-    // must be sized by the audio the encoder actually gets.
+fn render_length_follows_the_audio_it_is_muxed_with() {
+    // The WAV that ffmpeg muxes (and `-shortest` trims to) sets the video length.
     let plan = render_plan(&RenderArgs::new("samples/ravezilla.m4a")).unwrap();
-    assert_eq!(plan.driver, projectmp4::audio::DriverKind::Stems, "ravezilla's stems are missing from the cache");
     let o = Command::new("ffmpeg")
         .args(["-v", "error", "-nostdin", "-i", "samples/ravezilla.m4a", "-vn", "-ac", "2", "-ar", "48000", "-f", "f32le", "-"])
         .output()

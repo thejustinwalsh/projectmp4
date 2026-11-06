@@ -4,7 +4,7 @@ use projectmp4::audio::normalise::PIPELINE_RATE;
 #[path = "common/tmp.rs"]
 mod tmp;
 use tmp::Tmp;
-use projectmp4::audio::{normalise, Analysis, Driver, DriverKind};
+use projectmp4::audio::{normalise, Analysis, Driver};
 use std::path::Path;
 
 const RAVEZILLA: &str = "samples/ravezilla.m4a";
@@ -14,7 +14,7 @@ const THREE_NOTE_SIGNATURE: &str = "samples/three-note-signature.m4a";
 fn fixture(p: &str) -> (Analysis, Driver) {
     let src = tmp::normalised(p);
     let a = analyse(&src, Path::new(DEFAULT_MODELS)).unwrap();
-    let d = Driver::load(&src, Some(DriverKind::Mix)).unwrap();
+    let d = Driver::load(&src).unwrap();
     (a, d)
 }
 
@@ -94,7 +94,6 @@ fn synthetic(burst_hz: f64) -> (Analysis, Driver) {
         beats: Vec::new(),
         downbeats: (1..20).map(|k| 2.0 * k as f64).collect(),
         duration: d.frames() as f64 / d.rate as f64,
-        from_cache: false,
     };
     (a, d)
 }
@@ -130,7 +129,7 @@ fn driver_from(len_s: f64, f: impl Fn(f64) -> f64) -> Driver {
     let path = tmp.join("synthetic.wav");
     std::fs::write(&path, wav).unwrap();
     let src = normalise(&path, &tmp).unwrap();
-    let d = Driver::load(&src, Some(DriverKind::Mix)).unwrap();
+    let d = Driver::load(&src).unwrap();
     assert_eq!(d.rate, rate, "premise: driver runs at the pipeline rate");
     d
 }
@@ -181,7 +180,7 @@ fn ambient_intro() -> &'static Driver {
 }
 
 fn analysis(downbeats: Vec<f64>, d: &Driver) -> Analysis {
-    Analysis { bpm: 0.0, beats: downbeats.clone(), downbeats, duration: d.frames() as f64 / d.rate as f64, from_cache: false }
+    Analysis { bpm: 0.0, beats: downbeats.clone(), downbeats, duration: d.frames() as f64 / d.rate as f64 }
 }
 
 /// Longest stretch with no preset change, counting from the opening preset at 0 to the end.
@@ -284,7 +283,6 @@ fn a_majority_silent_intro_does_not_disable_the_drop_cut() {
         beats: Vec::new(),
         downbeats: (1..20).map(|k| 2.0 * k as f64).collect(),
         duration: d.frames() as f64 / d.rate as f64,
-        from_cache: false,
     };
     let sw = plan_switches(&a, &d, 6.0, 2.0);
     let at = sw.iter().find(|s| (s.t - 34.0).abs() < 1e-6);
@@ -313,7 +311,6 @@ fn a_downbeat_too_near_the_start_does_not_calibrate_the_drop_threshold() {
         beats: Vec::new(),
         downbeats: vec![0.12, 12.0, 24.0, 36.0],
         duration: d.frames() as f64 / d.rate as f64,
-        from_cache: false,
     };
     let sw = plan_switches(&a, &d, 8.0, 4.0);
     let got: Vec<(f64, Cut)> = sw.iter().map(|s| (s.t, s.cut)).collect();
