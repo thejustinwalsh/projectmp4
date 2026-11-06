@@ -74,6 +74,14 @@ struct PlanCmd {
     /// Watermark does not pulse with the bass.
     #[arg(long)]
     static_overlay: bool,
+    /// Do not limit frame-to-frame luminance change. The limiter keeps the
+    /// output under the WCAG 2.3.1 photosensitive-seizure flash threshold.
+    #[arg(long)]
+    no_flash_guard: bool,
+    /// Largest change of frame-mean luminance per frame the flash guard allows
+    /// (fraction of maximum, 0.001 to 1.0). 0.010 is the measured default.
+    #[arg(long, default_value_t = crate::render::flash::DEFAULT_LIMIT, value_parser = parse_flash_limit)]
+    flash_limit: f32,
 }
 
 impl PlanCmd {
@@ -89,6 +97,8 @@ impl PlanCmd {
         a.art = self.art;
         a.watermark_style = self.watermark_style;
         a.static_overlay = self.static_overlay;
+        a.flash_guard = !self.no_flash_guard;
+        a.flash_limit = self.flash_limit;
         a
     }
 }
@@ -111,6 +121,12 @@ struct RenderCmd {
 fn parse_limit(s: &str) -> std::result::Result<f64, String> {
     let v: f64 = s.parse().map_err(|_| format!("{s:?} is not a number"))?;
     crate::render::plan::check_limit(v).map_err(|e| e.0.into_owned())?;
+    Ok(v)
+}
+
+fn parse_flash_limit(s: &str) -> std::result::Result<f32, String> {
+    let v: f32 = s.parse().map_err(|_| format!("{s:?} is not a number"))?;
+    crate::render::plan::check_flash_limit(v).map_err(|e| e.0.into_owned())?;
     Ok(v)
 }
 

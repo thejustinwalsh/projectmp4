@@ -519,6 +519,10 @@ fn preset_switches_land_on_their_planned_frames() {
     a.limit_seconds = Some(40.0);
     a.out = Some(shared_dir("render_e2e_switches").join("out.mp4"));
     a.fast = true;
+    // This test reads the preset on screen frame by frame, including the instant
+    // Hard cut. The flash guard exists to make that cut not instant (a red -> blue
+    // jump is a full-frame flash), so it is off here; the guard has its own suites.
+    a.flash_guard = false;
     let r = render_report(&a).unwrap();
 
     // The first 40 s of ravezilla hold three Soft switches then a Hard one, so
@@ -620,7 +624,7 @@ fn dump_plan_cli_writes_a_plan_and_renders_nothing() {
     // Run in the temp dir: a render would drop <stem>.mp4 into the working directory.
     let o = Command::new(env!("CARGO_BIN_EXE_projectmp4"))
         .current_dir(&tmp.0)
-        .args(["render", &input, "--watermark-style", "sigil", "--static-overlay", "--fast", "--title", "T", "--dump-plan"])
+        .args(["render", &input, "--watermark-style", "sigil", "--static-overlay", "--fast", "--no-flash-guard", "--flash-limit", "0.02", "--title", "T", "--dump-plan"])
         .arg(&path)
         .output()
         .unwrap();
@@ -635,6 +639,8 @@ fn dump_plan_cli_writes_a_plan_and_renders_nothing() {
     assert_eq!(dumped.watermark_style, projectmp4::render::MarkStyle::Sigil);
     assert!(dumped.static_overlay);
     assert!(dumped.fast);
+    assert!(!dumped.flash_guard);
+    assert_eq!(dumped.flash_limit, 0.02);
     assert_eq!(dumped.title, "T");
     assert_eq!(dumped.packs_revision.as_deref(), Some(pinned_cotc_commit().as_str()));
     // And the same arguments through the library give the same plan.
@@ -642,10 +648,15 @@ fn dump_plan_cli_writes_a_plan_and_renders_nothing() {
     a.watermark_style = projectmp4::render::MarkStyle::Sigil;
     a.static_overlay = true;
     a.fast = true;
+    a.flash_guard = false;
+    a.flash_limit = 0.02;
     a.title = Some("T".into());
     assert_eq!(dumped, render_plan(&a).unwrap());
     // The default is the wordmark: nothing selects the sigil unless asked.
     assert_eq!(render_plan(&RenderArgs::new(&input)).unwrap().watermark_style, projectmp4::render::MarkStyle::Word);
+    // The guard is on, at the measured limit, unless switched off.
+    let d = render_plan(&RenderArgs::new(&input)).unwrap();
+    assert!(d.flash_guard && d.flash_limit == 0.010, "{} {}", d.flash_guard, d.flash_limit);
 }
 
 #[test]
@@ -743,13 +754,15 @@ fn a_plan_dumped_by_an_older_version_still_loads() {
     // added after the first version and the rest must load, with defaults.
     let plan = plan_of(SIGNATURE);
     let mut v: serde_json::Value = serde_json::from_str(&plan.to_json()).unwrap();
-    for k in ["limit_seconds", "watermark_style", "static_overlay", "fast", "packs_revision"] {
+    for k in ["limit_seconds", "watermark_style", "static_overlay", "fast", "flash_guard", "flash_limit", "packs_revision"] {
         assert!(v.as_object_mut().unwrap().remove(k).is_some(), "{k} was not in the dump");
     }
     let old = RenderPlan::from_json(&v.to_string()).unwrap();
     assert_eq!(old.limit_seconds, None);
     assert_eq!(old.watermark_style, projectmp4::render::MarkStyle::Word);
     assert!(!old.static_overlay && !old.fast);
+    // A plan that predates the guard replays with it on.
+    assert!(old.flash_guard && old.flash_limit == 0.010);
     assert_eq!(old.packs_revision, None);
     assert_eq!(old.preset_sequence, plan.preset_sequence);
     assert_eq!(old.switches, plan.switches);

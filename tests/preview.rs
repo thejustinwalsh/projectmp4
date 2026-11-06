@@ -33,6 +33,8 @@ fn plan_of(pool_len: usize, switches: &[(f64, Cut)], fps: u32) -> RenderPlan {
         watermark_style: MarkStyle::Word,
         static_overlay: false,
         fast: false,
+        flash_guard: true,
+        flash_limit: 0.010,
         packs_revision: None,
         switches,
         preset_sequence,

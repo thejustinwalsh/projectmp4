@@ -6,6 +6,7 @@ use crate::audio::Driver;
 use crate::encode::Encoder;
 use crate::ffi::{Channels, Error, Result};
 use crate::gl_context::GlContext;
+use crate::render::flash::FlashGuard;
 use crate::render::Overlay;
 use std::path::{Path, PathBuf};
 
@@ -40,6 +41,10 @@ pub struct RenderReport {
     pub frames: u64,
     /// Frames actually handed to the encoder; always equals `frames` on success.
     pub frames_written: u64,
+    /// Frames on which the flash guard blended anything (0 when it is off).
+    pub guard_engaged_frames: u64,
+    /// The smallest blend factor the guard applied (1.0 when it never engaged).
+    pub guard_min_alpha: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -311,6 +316,7 @@ fn run(args: &RenderArgs, prep: &Prepared) -> Result<RenderReport> {
     let mut frames_written = 0u64;
     // One frame buffer for the whole render; `glReadPixels` overwrites all of it.
     let mut px = vec![0u8; w * h * 4];
+    let mut guard = plan.flash_guard.then(|| FlashGuard::new(w, h, plan.flash_limit));
     for n in 0..plan.total_frames {
         while next_switch < switch_at.len() && switch_at[next_switch] <= n {
             let cut = plan.switches[next_switch].cut;
@@ -345,6 +351,10 @@ fn run(args: &RenderArgs, prep: &Prepared) -> Result<RenderReport> {
         )?;
 
         flip_rows(&mut px, w, h);
+        // Before the overlay: the title, art and watermark are brand surface and stay undimmed.
+        if let Some(g) = guard.as_mut() {
+            g.limit(&mut px);
+        }
         overlay.draw(&mut px, WIDTH, HEIGHT, bass[n as usize]);
         enc.write_frame(&px)?;
         frames_written += 1;
@@ -353,6 +363,14 @@ fn run(args: &RenderArgs, prep: &Prepared) -> Result<RenderReport> {
         }
     }
     enc.finish()?;
+    let (guard_engaged_frames, guard_min_alpha) = guard.as_ref().map_or((0, 1.0), |g| (g.engaged_frames(), g.min_alpha()));
+    if args.progress && guard.is_some() {
+        eprintln!(
+            "flash guard: engaged on {guard_engaged_frames}/{} frames ({:.1}%), hardest alpha {guard_min_alpha:.3}",
+            plan.total_frames,
+            100.0 * guard_engaged_frames as f64 / plan.total_frames as f64
+        );
+    }
     Ok(RenderReport {
         out,
         plan: plan.clone(),
@@ -363,6 +381,8 @@ fn run(args: &RenderArgs, prep: &Prepared) -> Result<RenderReport> {
         max_black_run: watch.max_run,
         frames: plan.total_frames,
         frames_written,
+        guard_engaged_frames,
+        guard_min_alpha,
     })
 }
 

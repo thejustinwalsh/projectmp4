@@ -1,4 +1,5 @@
 //! Per-frame compositing of the title/art/watermark overlay.
+pub mod flash;
 pub mod mark;
 pub mod plan;
 pub mod r#loop;
