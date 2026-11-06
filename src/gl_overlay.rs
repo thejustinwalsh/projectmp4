@@ -29,6 +29,10 @@ mod gl {
     pub const NEAREST: GLint = 0x2600;
     pub const CLAMP_TO_EDGE: GLint = 0x812F;
     pub const BLEND: GLenum = 0x0BE2;
+    pub const DEPTH_TEST: GLenum = 0x0B71;
+    pub const CULL_FACE: GLenum = 0x0B44;
+    pub const PACK_ALIGNMENT: GLenum = 0x0D05;
+    pub const UNPACK_ALIGNMENT: GLenum = 0x0CF5;
     pub const ONE: GLenum = 1;
     pub const ONE_MINUS_SRC_ALPHA: GLenum = 0x0303;
     pub const TRIANGLE_STRIP: GLenum = 5;
@@ -76,6 +80,8 @@ mod gl {
         #[link_name = "glGetIntegerv"] pub fn get_integerv(p: GLenum, out: *mut GLint);
         #[link_name = "glIsEnabled"] pub fn is_enabled(cap: GLenum) -> u8;
         #[link_name = "glBlendFuncSeparate"] pub fn blend_func_separate(sr: GLenum, dr: GLenum, sa: GLenum, da: GLenum);
+        #[link_name = "glPixelStorei"] pub fn pixel_storei(p: GLenum, v: GLint);
+        #[link_name = "glReadPixels"] pub fn read_pixels(x: GLint, y: GLint, w: GLsizei, h: GLsizei, format: GLenum, ty: GLenum, px: *mut c_void);
         #[link_name = "glEnable"] pub fn enable(cap: GLenum);
         #[link_name = "glDisable"] pub fn disable(cap: GLenum);
         #[link_name = "glBlendFunc"] pub fn blend_func(s: GLenum, d: GLenum);
@@ -152,6 +158,8 @@ pub struct GlOverlay {
     view: gl::GLint,
     block: Option<Tex>,
     marks: Vec<Tex>,
+    /// The frame the flash guard hands back, re-uploaded every frame.
+    frame: Tex,
 }
 
 impl GlOverlay {
@@ -193,6 +201,11 @@ impl GlOverlay {
                 view: gl::get_uniform_location(program, c"view".as_ptr()),
                 block: overlay.block_layer(w, h).map(|l| upload(&l)),
                 marks: overlay.mark_layers(w, h).iter().map(upload).collect(),
+                frame: {
+                    let mut id = 0;
+                    gl::gen_textures(1, &mut id);
+                    Tex { id }
+                },
             })
         }
     }
@@ -245,6 +258,66 @@ impl GlOverlay {
         }
     }
 
+    /// Reads the bound framebuffer (`w`*`h`, RGBA, bottom row first) into `buf`,
+    /// lets `f` change it, and draws the result back opaque over the whole
+    /// framebuffer. This is how the preview applies the flash guard: projectM
+    /// draws into the window, the guard works on the pixels, and the overlay is
+    /// drawn afterwards so it is never dimmed. Costs a readback and an upload
+    /// per frame. Restores the same state `draw` does, plus depth test, face
+    /// culling and the pixel-store alignments.
+    pub fn filter_frame(&self, buf: &mut Vec<u8>, w: u32, h: u32, f: impl FnOnce(&mut [u8])) {
+        buf.resize(w as usize * h as usize * 4, 0);
+        let geti = |p: gl::GLenum| unsafe {
+            let mut v = 0;
+            gl::get_integerv(p, &mut v);
+            v
+        };
+        let (program, vao, unit) = (geti(gl::CURRENT_PROGRAM), geti(gl::VERTEX_ARRAY_BINDING), geti(gl::ACTIVE_TEXTURE));
+        let (pack, unpack) = (geti(gl::PACK_ALIGNMENT), geti(gl::UNPACK_ALIGNMENT));
+        let (blend_on, depth_on, cull_on) =
+            unsafe { (gl::is_enabled(gl::BLEND) != 0, gl::is_enabled(gl::DEPTH_TEST) != 0, gl::is_enabled(gl::CULL_FACE) != 0) };
+        unsafe {
+            gl::pixel_storei(gl::PACK_ALIGNMENT, 1);
+            gl::read_pixels(0, 0, w as i32, h as i32, gl::RGBA, gl::UNSIGNED_BYTE, buf.as_mut_ptr() as *mut c_void);
+        }
+        f(buf);
+        unsafe {
+            gl::active_texture(gl::TEXTURE0);
+            let tex0 = geti(gl::TEXTURE_BINDING_2D);
+            gl::bind_texture(gl::TEXTURE_2D, self.frame.id);
+            gl::tex_parameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST);
+            gl::tex_parameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST);
+            gl::tex_parameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE);
+            gl::tex_parameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE);
+            gl::pixel_storei(gl::UNPACK_ALIGNMENT, 1);
+            gl::tex_image_2d(gl::TEXTURE_2D, 0, gl::RGBA8, w as i32, h as i32, 0, gl::RGBA, gl::UNSIGNED_BYTE, buf.as_ptr() as *const c_void);
+            gl::use_program(self.program);
+            gl::bind_vertex_array(self.vao);
+            gl::uniform2f(self.view, w as f32, h as f32);
+            // The rows are bottom-first, so the quad runs bottom-to-top: a negative height.
+            gl::uniform4f(self.rect, 0.0, h as f32, w as f32, -(h as f32));
+            gl::disable(gl::BLEND);
+            gl::disable(gl::DEPTH_TEST);
+            gl::disable(gl::CULL_FACE);
+            gl::draw_arrays(gl::TRIANGLE_STRIP, 0, 4);
+            if blend_on {
+                gl::enable(gl::BLEND);
+            }
+            if depth_on {
+                gl::enable(gl::DEPTH_TEST);
+            }
+            if cull_on {
+                gl::enable(gl::CULL_FACE);
+            }
+            gl::pixel_storei(gl::UNPACK_ALIGNMENT, unpack);
+            gl::pixel_storei(gl::PACK_ALIGNMENT, pack);
+            gl::bind_texture(gl::TEXTURE_2D, tex0 as gl::GLuint);
+            gl::active_texture(unit as gl::GLenum);
+            gl::bind_vertex_array(vao as gl::GLuint);
+            gl::use_program(program as gl::GLuint);
+        }
+    }
+
     /// Frees the GL objects; the context must be current. Idempotent, and also
     /// run by `Drop` (which cannot know the context is current, so call this
     /// explicitly first wherever the ordering matters).
@@ -253,6 +326,7 @@ impl GlOverlay {
             return;
         }
         unsafe {
+            gl::delete_textures(1, &self.frame.id);
             for t in self.block.iter().chain(&self.marks) {
                 gl::delete_textures(1, &t.id);
             }

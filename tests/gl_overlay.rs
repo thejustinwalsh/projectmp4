@@ -229,3 +229,33 @@ fn dropping_a_gl_overlay_frees_its_objects() {
     assert_eq!(live_objects(), before);
     drop(gl);
 }
+
+#[test]
+fn filter_frame_round_trips_the_framebuffer_without_flipping_it() {
+    // The preview hands the window's pixels to the flash guard and draws them back.
+    // An identity filter must leave the picture exactly as it was, right way up,
+    // and an edit must land where it was made.
+    let overlay = Overlay::new("T", None, None, MarkStyle::Word, true).unwrap();
+    let gl = GlContext::new(W, H).unwrap();
+    let mut gpu_overlay = GlOverlay::new(&overlay, W, H).unwrap();
+    unsafe { glBindFramebuffer(FRAMEBUFFER, gl.fbo()) };
+    gpu_background();
+    let before = gl.read_rgba().unwrap();
+    let mut buf = Vec::new();
+    let mut seen = Vec::new();
+    gpu_overlay.filter_frame(&mut buf, W, H, |px| seen = px.to_vec());
+    assert_eq!(seen, before, "the filter must see the framebuffer as GL stores it (bottom row first)");
+    assert_eq!(gl.read_rgba().unwrap(), before, "an identity filter changed or flipped the picture");
+
+    // Paint the top quarter (the last rows in GL order) white and check where it lands.
+    gpu_overlay.filter_frame(&mut buf, W, H, |px| {
+        let top = (W * H) as usize * 4 / 4;
+        let n = px.len();
+        px[n - top..].fill(255);
+    });
+    let after = gl.read_rgba().unwrap();
+    let n = after.len();
+    assert!(after[n - 4..n].iter().all(|&b| b == 255), "top-right pixel should be white");
+    assert_eq!(after[..4], before[..4], "bottom-left pixel should be untouched");
+    gpu_overlay.delete();
+}

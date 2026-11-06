@@ -316,7 +316,7 @@ fn run(args: &RenderArgs, prep: &Prepared) -> Result<RenderReport> {
     let mut frames_written = 0u64;
     // One frame buffer for the whole render; `glReadPixels` overwrites all of it.
     let mut px = vec![0u8; w * h * 4];
-    let mut guard = plan.flash_guard.then(|| FlashGuard::new(w, h, plan.flash_limit));
+    let mut guard = plan.flash_guard.then(|| FlashGuard::new(w, h, fps, plan.flash_rate));
     for n in 0..plan.total_frames {
         while next_switch < switch_at.len() && switch_at[next_switch] <= n {
             let cut = plan.switches[next_switch].cut;

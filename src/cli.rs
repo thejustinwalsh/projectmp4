@@ -78,10 +78,11 @@ struct PlanCmd {
     /// output under the WCAG 2.3.1 photosensitive-seizure flash threshold.
     #[arg(long)]
     no_flash_guard: bool,
-    /// Largest change of frame-mean luminance per frame the flash guard allows
-    /// (fraction of maximum, 0.001 to 1.0). 0.010 is the measured default.
-    #[arg(long, default_value_t = crate::render::flash::DEFAULT_LIMIT, value_parser = parse_flash_limit)]
-    flash_limit: f32,
+    /// Most relative luminance (fraction of maximum) any region may travel per
+    /// second under the flash guard, below 0.60. Flashes per second are bounded
+    /// by rate / 0.20 at every fps; the 0.48 default gives 2.4.
+    #[arg(long, default_value_t = crate::render::flash::DEFAULT_RATE, value_parser = parse_flash_rate)]
+    flash_rate: f32,
 }
 
 impl PlanCmd {
@@ -98,7 +99,7 @@ impl PlanCmd {
         a.watermark_style = self.watermark_style;
         a.static_overlay = self.static_overlay;
         a.flash_guard = !self.no_flash_guard;
-        a.flash_limit = self.flash_limit;
+        a.flash_rate = self.flash_rate;
         a
     }
 }
@@ -124,9 +125,9 @@ fn parse_limit(s: &str) -> std::result::Result<f64, String> {
     Ok(v)
 }
 
-fn parse_flash_limit(s: &str) -> std::result::Result<f32, String> {
+fn parse_flash_rate(s: &str) -> std::result::Result<f32, String> {
     let v: f32 = s.parse().map_err(|_| format!("{s:?} is not a number"))?;
-    crate::render::plan::check_flash_limit(v).map_err(|e| e.0.into_owned())?;
+    crate::render::plan::check_flash_rate(v).map_err(|e| e.0.into_owned())?;
     Ok(v)
 }
 

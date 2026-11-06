@@ -46,8 +46,8 @@ pub struct RenderArgs {
     pub fast: bool,
     /// Limit frame-to-frame luminance change (WCAG 2.3.1). On unless disabled.
     pub flash_guard: bool,
-    /// Largest change of frame-mean luminance per frame the guard allows.
-    pub flash_limit: f32,
+    /// Most relative luminance any region may travel per second under the guard.
+    pub flash_rate: f32,
     /// Default: `<input stem>.mp4` in the working directory.
     pub out: Option<PathBuf>,
     pub models: PathBuf,
@@ -72,7 +72,7 @@ impl RenderArgs {
             static_overlay: false,
             fast: false,
             flash_guard: true,
-            flash_limit: crate::render::flash::DEFAULT_LIMIT,
+            flash_rate: crate::render::flash::DEFAULT_RATE,
             out: None,
             models: PathBuf::from(DEFAULT_MODELS),
             progress: false,
@@ -108,7 +108,7 @@ pub struct RenderPlan {
     pub static_overlay: bool,
     pub fast: bool,
     pub flash_guard: bool,
-    pub flash_limit: f32,
+    pub flash_rate: f32,
     /// Pinned commit of the preset pack the pool was resolved against.
     pub packs_revision: Option<String>,
     pub switches: Vec<SwitchPoint>,
@@ -140,7 +140,7 @@ impl RenderPlan {
             "fast": self.fast,
             "flash_guard": self.flash_guard,
             // Rounded so an f32 like 0.010 reads back as 0.01, not 0.009999999776.
-            "flash_limit": (self.flash_limit as f64 * 1e6).round() / 1e6,
+            "flash_rate": (self.flash_rate as f64 * 1e6).round() / 1e6,
             "packs_revision": self.packs_revision,
             "switches": self.switches.iter().map(|s| json!({
                 "t": s.t,
@@ -215,9 +215,9 @@ impl RenderPlan {
             fast: v.get("fast").and_then(Value::as_bool).unwrap_or(false),
             // A plan from before the guard existed replays with it on: safe by default.
             flash_guard: v.get("flash_guard").and_then(Value::as_bool).unwrap_or(true),
-            flash_limit: match v.get("flash_limit") {
-                None | Some(Value::Null) => crate::render::flash::DEFAULT_LIMIT,
-                Some(x) => x.as_f64().ok_or_else(|| bad("flash_limit"))? as f32,
+            flash_rate: match v.get("flash_rate") {
+                None | Some(Value::Null) => crate::render::flash::DEFAULT_RATE,
+                Some(x) => x.as_f64().ok_or_else(|| bad("flash_rate"))? as f32,
             },
             packs_revision: opt_str("packs_revision")?,
             switches,
@@ -274,7 +274,7 @@ pub(crate) fn prepare(args: &RenderArgs) -> Result<Prepared> {
     if let Some(l) = args.limit_seconds {
         check_limit(l)?;
     }
-    check_flash_limit(args.flash_limit)?;
+    check_flash_rate(args.flash_rate)?;
     let tmp = TempDir::new()?;
     let src = normalise(&args.input, &tmp.0)?;
     prepare_with(args, tmp, src)
@@ -345,7 +345,7 @@ fn prepare_with(args: &RenderArgs, tmp: TempDir, src: crate::audio::Source) -> R
         static_overlay: args.static_overlay,
         fast: args.fast,
         flash_guard: args.flash_guard,
-        flash_limit: args.flash_limit,
+        flash_rate: args.flash_rate,
         // Only a pool resolved from the packs has a pack revision to record.
         packs_revision: if args.presets.is_empty() {
             crate::presets::packs::sources()
@@ -389,14 +389,19 @@ fn resolve_pool(args: &RenderArgs) -> Result<(Vec<PathBuf>, Option<PathBuf>)> {
     Ok((pool, Some(packs.textures)))
 }
 
-/// The flash limit is a fraction of maximum luminance per frame.
-pub fn check_flash_limit(l: f32) -> Result<()> {
-    if l.is_finite() && (0.001..=1.0).contains(&l) {
+/// The flash rate is relative luminance per second. It must be strictly below
+/// 0.60: the guard bounds flashes per second by `rate / 0.20` (a flash needs
+/// 0.10 of travel each way), so 0.60 permits exactly 3.0, the WCAG threshold,
+/// rather than under it.
+pub fn check_flash_rate(r: f32) -> Result<()> {
+    use crate::render::flash::{DEFAULT_RATE, MAX_RATE};
+    if r.is_finite() && (0.001..MAX_RATE).contains(&r) {
         Ok(())
     } else {
         Err(Error::msg(format!(
-            "--flash-limit must be within 0.001..=1.0 (measured default {}), got {l}",
-            crate::render::flash::DEFAULT_LIMIT
+            "--flash-rate must be at least 0.001 and below {MAX_RATE} (measured default {DEFAULT_RATE}), got {r}: \
+             a rate of {MAX_RATE}/s permits exactly {MAX_RATE}/0.20 = 3.0 flashes per second, which is the WCAG \
+             threshold rather than under it"
         )))
     }
 }

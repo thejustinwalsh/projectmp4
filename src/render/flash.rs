@@ -15,15 +15,28 @@ pub const FLASH_DELTA: f32 = 0.10;
 pub const FLASH_DARK: f32 = 0.80;
 /// More than this many flashes in any one-second window fails WCAG 2.3.1.
 pub const FLASH_LIMIT_PER_SECOND: usize = 3;
-/// Default maximum change in frame-mean luminance per frame. Measured on the
-/// real luminance trace of a render: 0.012 is the first value that reaches
-/// the threshold, 0.010 leaves a frame of headroom.
-pub const DEFAULT_LIMIT: f32 = 0.010;
+/// Default maximum travel of relative luminance per second in any region
+/// (0.008 per frame at 60 fps). The bound it gives is `rate / 0.20` = 2.4
+/// flashes per second at every frame rate.
+pub const DEFAULT_RATE: f32 = 0.48;
+/// A rate of exactly this permits exactly 3.0 flashes per second, the
+/// threshold rather than under it, so the rate must be strictly below it.
+pub const MAX_RATE: f32 = 0.60;
 
-const GRID: usize = 4;
-/// A single grid cell is 1/16 of the frame, under WCAG's 25% area condition,
-/// so it may swing twice as far per frame as the frame mean.
-const CELL_ALLOWANCE: f32 = 2.0;
+/// The frame is divided into GRID x GRID cells, each constrained separately.
+/// At 1920x1080 a cell is 240x135 = 32,400 px^2. WCAG's area condition is 25%
+/// of a 10-degree field: at about 3 picture heights that is ~600 px across,
+/// ~283,000 px^2, a quarter of it ~70,700 px^2 (about 266x266). A 4x4 grid
+/// (480x270 = 129,600 px^2) was nearly twice that, so one cell could flash
+/// alone and fail; 8x8 is comfortably under.
+const GRID: usize = 8;
+/// Every cell carries the same per-frame delta as the frame mean. A mean of
+/// cells each within +/- delta is itself within +/- delta, so any union of
+/// whole cells, and so any region that size or larger, inherits the bound.
+/// (A region not aligned to the grid can exceed it by at most the ratio of
+/// the cell it sits in to the part of that cell it covers.) The frame-mean
+/// constraint is therefore implied; it is kept because it is nearly free.
+const CELL_ALLOWANCE: f32 = 1.0;
 const ENC_STEPS: usize = 4096;
 
 fn srgb_decode(b: u8) -> f32 {
@@ -201,11 +214,18 @@ pub fn windows_over_limit(series_len: usize, flashes: &[usize], fps: u32) -> (us
     (over, total)
 }
 
-/// Limits frame-to-frame luminance change so a render stays under the
-/// photosensitive-seizure threshold. See the module docs.
+/// Limits luminance change so output stays under the photosensitive-seizure
+/// threshold. See the module docs.
+///
+/// The bound. Luminance in any region can travel at most `rate` per second
+/// (`delta = rate / fps` per frame). One WCAG flash consumes at least 0.20 of
+/// travel (two legs of >= 0.10), so flashes per second <= `rate / 0.20`,
+/// independent of fps. At `rate = 0.48` that is 2.4. A rate of 0.60 gives
+/// exactly 3.0, the threshold, which is why it is rejected.
 pub struct FlashGuard {
     w: usize,
     h: usize,
+    /// Per-frame delta: `rate / fps`.
     limit: f32,
     /// The previous output frame; empty before the first frame.
     prev: Vec<u8>,
@@ -216,11 +236,39 @@ pub struct FlashGuard {
 }
 
 impl FlashGuard {
-    /// `limit` is the largest change of frame-mean relative luminance per frame.
-    pub fn new(w: usize, h: usize, limit: f32) -> FlashGuard {
+    /// `rate_per_second` is the most relative luminance any region may travel
+    /// in one second; the per-frame delta is `rate_per_second / fps`.
+    pub fn new(w: usize, h: usize, fps: u32, rate_per_second: f32) -> FlashGuard {
         assert!(w >= GRID && h >= GRID, "frame {w}x{h} is smaller than the {GRID}x{GRID} grid");
-        assert!(limit > 0.0 && limit.is_finite(), "flash limit must be positive, got {limit}");
+        assert!(fps > 0, "fps must be positive");
+        assert!(rate_per_second > 0.0 && rate_per_second.is_finite(), "flash rate must be positive, got {rate_per_second}");
+        let limit = rate_per_second / fps as f32;
         FlashGuard { w, h, limit, prev: Vec::new(), prev_sums: Vec::new(), counts: Vec::new(), engaged: 0, min_alpha: 1.0 }
+    }
+
+    /// Change the frame size (a resized window). The previous output is
+    /// resampled, so the next frame is still limited against it.
+    pub fn resize(&mut self, w: usize, h: usize) {
+        assert!(w >= GRID && h >= GRID, "frame {w}x{h} is smaller than the {GRID}x{GRID} grid");
+        if (w, h) == (self.w, self.h) {
+            return;
+        }
+        if !self.prev.is_empty() {
+            let mut n = vec![0u8; w * h * 4];
+            for y in 0..h {
+                let sy = y * self.h / h;
+                for x in 0..w {
+                    let sx = x * self.w / w;
+                    n[(y * w + x) * 4..(y * w + x) * 4 + 4].copy_from_slice(&self.prev[(sy * self.w + sx) * 4..(sy * self.w + sx) * 4 + 4]);
+                }
+            }
+            let (sums, counts) = cell_sums(&n, w, h, GRID, GRID);
+            self.prev = n;
+            self.prev_sums = sums;
+            self.counts = counts;
+        }
+        self.w = w;
+        self.h = h;
     }
 
     /// Limit `px` (RGBA, `w*h*4`) against the previous output in place and

@@ -22,6 +22,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use crate::ffi::{Error, Instance, MakeCurrent, Result};
 use crate::gl_context::proc_loader;
 use crate::gl_overlay::GlOverlay;
+use crate::render::flash::FlashGuard;
 use crate::render::r#loop::bass_per_frame;
 use crate::render::Overlay;
 use crate::render::plan::{prepare, RenderArgs, RenderPlan};
@@ -522,6 +523,11 @@ struct App<'a> {
     driver: &'a crate::audio::Driver,
     overlay: Overlay,
     gl_overlay: GlOverlay,
+    /// Limits luminance change before the overlay is drawn; `None` under `--no-flash-guard`.
+    guard: Option<FlashGuard>,
+    guard_buf: Vec<u8>,
+    /// Time inside the guard (readback, limit, upload), summed.
+    guard_total: Duration,
     /// Bass level per frame, as the render computes it for the watermark pulse.
     bass: Vec<f32>,
     size: (u32, u32),
@@ -578,6 +584,18 @@ impl App<'_> {
         self.pm.set_frame_time(due.frame as f64 / self.fps as f64);
         let t0 = Instant::now();
         self.pm.render_frame_fbo(0);
+        if let Some(g) = self.guard.as_mut() {
+            let (w, h) = (self.size.0 as usize, self.size.1 as usize);
+            // A window under 8 px a side holds no region WCAG could count.
+            if w >= 8 && h >= 8 {
+                let tg = Instant::now();
+                g.resize(w, h);
+                self.gl_overlay.filter_frame(&mut self.guard_buf, self.size.0, self.size.1, |px| {
+                    g.limit(px);
+                });
+                self.guard_total += tg.elapsed();
+            }
+        }
         let bass = self.bass.get(due.frame as usize).or(self.bass.last()).copied().unwrap_or(0.0);
         self.gl_overlay.draw(&self.overlay, self.size.0, self.size.1, bass);
         self.stats.render_total += t0.elapsed();
@@ -710,6 +728,9 @@ pub fn preview(args: &RenderArgs) -> Result<()> {
         driver: &prep.driver,
         overlay,
         gl_overlay,
+        guard: plan.flash_guard.then(|| FlashGuard::new(sw.max(8) as usize, sh.max(8) as usize, plan.fps, plan.flash_rate)),
+        guard_buf: Vec::new(),
+        guard_total: Duration::ZERO,
         bass,
         size,
         state,
@@ -728,6 +749,16 @@ pub fn preview(args: &RenderArgs) -> Result<()> {
         app.gl_overlay.delete();
     }
     ran?;
+    if let Some(g) = &app.guard {
+        let n = app.pacer.rendered().max(1);
+        eprintln!(
+            "preview: flash guard engaged on {}/{n} frames ({:.1}%), hardest alpha {:.3}, {:.1} ms per frame",
+            g.engaged_frames(),
+            100.0 * g.engaged_frames() as f64 / n as f64,
+            g.min_alpha(),
+            app.guard_total.as_secs_f64() * 1000.0 / n as f64
+        );
+    }
     if let Some(e) = app.error.take() {
         return Err(e);
     }

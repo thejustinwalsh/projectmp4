@@ -34,7 +34,7 @@ fn plan_of(pool_len: usize, switches: &[(f64, Cut)], fps: u32) -> RenderPlan {
         static_overlay: false,
         fast: false,
         flash_guard: true,
-        flash_limit: 0.010,
+        flash_rate: 0.48,
         packs_revision: None,
         switches,
         preset_sequence,
