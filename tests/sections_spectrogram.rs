@@ -125,8 +125,25 @@ fn stems_of_different_lengths_are_rejected() {
 fn bands_match_the_cached_reference_spectrogram_on_real_stems() {
     let root = agentdeck::root();
     if !root.exists() {
-        eprintln!("SKIPPED: {} absent; parity oracle unavailable", root.display());
-        return;
+        // A silent skip here is the worst outcome available: this is the only test that
+        // proves the spectrogram matches the reference, and `eprintln!` is swallowed by
+        // cargo without --nocapture, so its absence would read as a pass. Fail instead,
+        // and make opting out an explicit, visible choice.
+        if std::env::var_os("PROJECTMP4_NO_PARITY_ORACLE").is_some() {
+            eprintln!("SKIPPED by PROJECTMP4_NO_PARITY_ORACLE: {} absent", root.display());
+            return;
+        }
+        panic!(
+            "parity oracle missing: {} does not exist.\n\
+             This test is the only check that the spectrogram matches the reference \
+             implementation, so it must not pass by default when it cannot run.\n\
+             The oracle is a cached [4, frames, 81] f32 tensor under \
+             sections/jobs/artifacts/ paired with its section result; nothing in this \
+             repository can regenerate it.\n\
+             If you are deliberately running without it, set \
+             PROJECTMP4_NO_PARITY_ORACLE=1.",
+            root.display()
+        );
     }
     let art = root.join("sections/jobs/artifacts");
     // result 51d3... (1200 frames) -> tensor 9b0e... -> bundle 3db3... (bundleHash of 9fe3...)
