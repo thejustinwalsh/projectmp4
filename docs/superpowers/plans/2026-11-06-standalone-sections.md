@@ -341,6 +341,15 @@ pub fn postprocess(logits: &[f32], frames: usize) -> Result<Vec<Section>>;
 pub fn estimated_working_bytes(frames: usize) -> u64;
 ```
 
+**Shape convention, settled by Task 17 — read this before anything else.** GGUF stores tensor
+dimensions fastest-varying first. Task 17's reader **reverses them**, so every shape
+`Weights::tensor` hands you is in row-major numpy order and matches `SCHEMA` exactly as written.
+Treat them as row-major numpy shapes throughout the forward pass. Getting this backwards produces
+a model that runs, allocates correctly and returns plausible-looking logits that are wrong, which
+the parity gate will catch but only after you have written the whole thing — so settle it first by
+asserting one known tensor's shape (`embeddings.conv1.weight` is `{24,1,12,12}`) before you build
+on it.
+
 - [ ] **Step 1: Read the reference and write the architecture note**
 
 Before writing code, read
