@@ -516,22 +516,45 @@ present. "`cargo build` is the only command" means *after* prerequisites, and th
   measure, and only add double-buffered PBO readback if readback is shown to be the bottleneck.
   If x264 `-preset slow` is the limit, drop to `medium` before changing CRF.
 
-### 10.3 agent-deck reuse — **decided: depend on its analysis crates, not just its cache**
+### 10.3 analysis crates — **decided: vendor them; projectmp4 is one standalone product**
 
-Discovered after the first draft, and revised after Justin pointed out that stems will not always
-exist: agent-deck contains not only a *cache* of analysis but the **Rust crates that produce it**.
-projectmp4 depends on those directly, so it can analyse any track — cache or no cache, stems or no
-stems. This supersedes §6.6's "write an RMS + spectral-flux detector" entirely.
+Revised twice. The first draft wrote its own detector. The second depended on agent-deck's crates
+as path dependencies, because agent-deck contains not only a *cache* of analysis but the **Rust
+crates that produce it** — which supersedes §6.6's "write an RMS + spectral-flux detector"
+entirely, and still does.
 
-**Crates consumed as path dependencies** (`/Users/tjw/Developer/agent-deck/native/`):
+**Superseded 2026-11-06, at Justin's direction: the crates are copied into this repository and
+owned here.** Path dependencies on `/Users/tjw/Developer/agent-deck/native/` meant projectmp4 would
+not build on any machine without agent-deck checked out at that exact absolute path — which is to
+say it was not a product, it was a satellite. `crates/README.md` records the copy and its
+verification.
+
+A detail worth keeping, found while copying: those three directories were **untracked** in
+agent-deck and appear in no commit of its history. Commit `639d8f5` here is the first time that
+code has been under version control anywhere, so there is no upstream revision to cite and nothing
+to diff against. This repository holds the only copy with a history.
+
+**Crates, now vendored at `crates/`** (layout mirrors agent-deck's `native/` so nothing inside them
+needed editing — `track-analysis` keeps `path = "../media-codec"` and its `build.rs` keeps
+`.file("../loop-analysis/src/deck_loops.cpp")`, and both resolve to the copies beside them):
 
 | Crate | Entry point | What it gives us |
 |---|---|---|
 | `deck-track-analysis` | `analyze(models: &Path, input: &Path) -> Result<serde_json::Value>` | bpm, `beats[]`, **`downbeats[]`**, spectral features, loop points — via `beat-this` 1.1.0 ONNX models under RTen |
 | `deck-media-codec` | `decode_mono(&Path) -> Vec<f32>`, `visit_stereo(&Path, cb)` | symphonia decode at **48 kHz**, plus `ebur128` loudness |
 
-Models ship at `native/track-analysis/models/{mel_spectrogram,beat_this_small}.onnx`; the path is
-passed in, so projectmp4 takes it from config with that directory as the default.
+A third directory, `loop-analysis` (229 lines of C++), came over whether wanted or not:
+`track-analysis/build.rs` compiles its kernel with `cc`. So projectmp4 owns the scored loop-point
+code. It is deliberately not wired into anything yet — see the sections plan.
+
+Models are committed at `crates/track-analysis/models/{mel_spectrogram,beat_this_small}.onnx`
+(10 MB). The path is still passed in, so `--analysis <dir>` overrides it; the default now resolves
+through `CARGO_MANIFEST_DIR` rather than an absolute path into another repository. Committed rather
+than fetched on first use, deliberately: this is an offline tool and a render should never fail
+because a download did.
+
+`cargo metadata` is the check that this decision holds. Every path package it resolves must sit
+under this repository.
 
 **Two traps found by reading the source, both handled:**
 
@@ -539,37 +562,62 @@ passed in, so projectmp4 takes it from config with that directory as the default
    `isomp4, ogg, pcm, wav`. A Suno **mp3 would fail to decode**, and `analyze()` calls
    `decode_mono` internally, so it would fail there too. *Resolution:* projectmp4 normalises every
    input to a temporary **48 kHz WAV via ffmpeg** before analysis and before the render driver.
-   ffmpeg is already a dependency, it gives one code path for every container, and **agent-deck is
-   not modified**. Do not "fix" this by editing agent-deck's Cargo.toml.
-2. **Everything in agent-deck is 48 kHz**, and so are the htdemucs stems. §6.3's 44.1 kHz is
-   wrong. **48 kHz is the pipeline rate throughout** — decode, analysis, stems, and the PCM fed to
-   projectM. The only resample is ffmpeg's, at the normalise step.
+   ffmpeg is already a dependency and it gives one code path for every container. Now that the
+   crate is vendored, enabling symphonia's mp3 feature in `crates/media-codec/Cargo.toml` is
+   finally *permissible* — but do not do it casually: the normalise step is also what guarantees
+   one sample rate and one channel layout reach both the analyser and the renderer, so removing it
+   would cost far more than it saves. Record any edit inside `crates/` in `crates/README.md`.
+2. **These crates are all 48 kHz.** §6.3's 44.1 kHz is wrong. **48 kHz is the pipeline rate
+   throughout** — decode, analysis, and the PCM fed to projectM. The only resample is ffmpeg's, at
+   the normalise step. One exception now exists and is confined to section analysis: the harmonix
+   model analyses at 44.1 kHz with a 441-sample hop, so that path resamples internally with a
+   64-tap centred sinc. It does not change the pipeline rate.
 
-**Signal priority for the visualizer driver**, best available wins:
+> **Superseded 2026-11-06.** This section originally made projectmp4 opportunistically reuse a
+> sibling application's (agent-deck's) caches: summed htdemucs stems to drive the visuals, and a
+> cached beat analysis to skip recomputation. Both were removed at the user's direction, and the
+> text below is the current design. The reason was not tidiness — it was that the same track
+> rendered differently depending on whether agent-deck happened to have processed it, which
+> contradicts the deterministic offline frame loop this document commits to elsewhere. One
+> consequence, measured rather than predicted: the change reaches preset **cut type** as well as
+> appearance, because cut kind is classified from the driver's low-band energy. A fixture whose
+> first four switches were `[Soft, Soft, Soft, Hard]` under stems is `[Soft, Soft, Hard, Hard]`
+> under the mix.
+
+**Signal for the visualizer driver:** the full mix at 48 kHz, always. There is no stem path and no
+`--driver` flag.
 
 ```
-1. cached htdemucs stems (drums + bass, summed)   ← naked kick, best reactivity
-2. full mix at 48 kHz                             ← always available
-   (both analysed by deck-track-analysis for beats/downbeats either way)
+full mix at 48 kHz  ->  deck-track-analysis (vendored, crates/track-analysis) for beats/downbeats
 ```
 
 Preset switches land on **downbeats** from `beat-this`, never on an estimated boundary. Hard cut on
 a downbeat that coincides with a large low-band energy step (a drop); 2 s soft blend otherwise.
-`--driver stems|mix` overrides; `--analysis <dir>` points at a different models directory.
+`--analysis <dir>` points at a different models directory.
 
-**Cache reuse stays, as a speed optimisation only.** Look up
-`~/Library/Application Support/agent-deck/analysis/<sha256>.json` first and skip recomputation on a
-hit. A miss costs time, never correctness. **Read-only — projectmp4 never writes into agent-deck's
-directory.**
+**No cache is consulted.** Every render analyses the audio it was given. A planted analysis entry
+that would once have been honoured is ignored, which `tests/no_agent_deck.rs` proves by planting
+one and asserting the beats came out computed. Nothing in `src/` constructs a path into another
+application's data directory, and the release binary contains no such string.
 
-#### Cached corpus (for fixtures)
+Separated stems may return later, but only if projectmp4 produces them itself — see
+`docs/superpowers/plans/2026-11-06-standalone-sections.md`, where a four-channel front end is
+required for section labelling and htdemucs is deliberately deferred behind a measurement. A stem
+path that projectmp4 computes is reproducible; one it finds lying around is not, which is the whole
+distinction this change rests on.
 
-| Cached | Engine | Coverage |
+#### Models and fixtures
+
+Models are vendored and committed, not fetched or borrowed:
+
+| What | Engine | Where |
 |---|---|---|
-| Beat grid + **downbeats** + BPM + cues | `beat-this-rs/1.1.0-small1-rten` (trained beat tracker) | 24/24 tracks |
-| 4-stem separation: vocals / **drums** / **bass** / other, 48 kHz | `htdemucs-q8_0` | 20/24 complete |
-| Loudness, mix-points | — | 70 / 159 files |
-| Source audio (m4a) | — | 9 on disk |
+| Beat grid + **downbeats** + BPM | `beat-this-rs/1.1.0-small1-rten` (trained beat tracker) | `crates/track-analysis/models/` |
+| Section labels | `allinone-harmonix` fold0, GGUF f32 | `assets/models/harmonix-fold0-f32.gguf` |
+
+Test fixtures come from `samples/`, which is gitignored and holds the user's own music. Earlier
+drafts of this document listed a cached corpus in agent-deck's data directory as the fixture
+source; that is no longer true of anything in the build or the test suite.
 
 Keyed by the track's **sha256**, which is also the filename: `analysis/<sha>.json`,
 `beats/<sha>.json`, and a stem manifest under `sections/requests/` giving absolute stem paths.
