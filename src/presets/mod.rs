@@ -1,3 +1,4 @@
+pub mod flashscore;
 pub mod manifest;
 pub mod packs;
 pub mod rank;

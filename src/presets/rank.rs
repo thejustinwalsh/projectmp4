@@ -8,6 +8,7 @@
 //! Preset files are untrusted data: they are only ever read as text, never run.
 
 use crate::ffi::{Error, Result};
+use crate::presets::flashscore::{with_scorer, FlashScore, PresetScorer, FLASH_CEILING};
 use crate::presets::manifest::unquote;
 use crate::presets::Packs;
 use std::collections::HashSet;
@@ -26,6 +27,28 @@ pub struct Score {
 pub struct Profile {
     pub name: String,
     pub presets: Vec<PathBuf>,
+    /// Flash score (`worst_second`) of each preset, parallel to `presets`; the margin under
+    /// the ceiling. Empty for a manifest written before flash scoring existed.
+    pub worst_second: Vec<u32>,
+    /// How many presets short of the requested count the pool ran out at. Never topped up
+    /// from presets over the ceiling.
+    pub shortfall: usize,
+}
+
+/// What a ranking run did, for reporting; not part of the manifest.
+#[derive(Debug, Clone, Default)]
+pub struct RankStats {
+    /// Candidates before the flash ceiling.
+    pub eligible: usize,
+    /// Candidates examined (cache hit, rendered, or found unloadable) before `n` passed.
+    pub examined: usize,
+    pub cache_hits: usize,
+    pub rendered: usize,
+    pub passed: usize,
+    /// Over the ceiling, with their scores.
+    pub rejected: Vec<(PathBuf, u32)>,
+    /// projectM could not load them: not strobes, set aside and counted separately.
+    pub unloadable: Vec<PathBuf>,
 }
 
 /// Every profile `Manifest::generate` writes, in file order.
@@ -346,9 +369,71 @@ pub fn eligible(packs: &Packs, profile: &str) -> Result<Vec<Candidate>> {
     Ok(out)
 }
 
+/// Walk `cands` (already best-first) and keep the first `n` whose `score` passes `ceiling`,
+/// scoring lazily so the cost follows the pass rate, not the size of the pool. `score`
+/// returns `Ok(None)` for a preset that cannot be loaded. If the pool runs out first the
+/// result is short (see `Profile::shortfall`); failures never fill the gap.
+pub fn select(
+    cands: &[Candidate],
+    n: usize,
+    ceiling: u32,
+    mut score: impl FnMut(&Candidate) -> Result<Option<FlashScore>>,
+) -> Result<(Vec<(PathBuf, u32)>, RankStats)> {
+    let mut stats = RankStats { eligible: cands.len(), ..RankStats::default() };
+    let mut picked = Vec::new();
+    for c in cands {
+        if picked.len() >= n {
+            break;
+        }
+        stats.examined += 1;
+        match score(c)? {
+            None => stats.unloadable.push(c.path.clone()),
+            Some(s) if s.worst_second <= ceiling => picked.push((c.path.clone(), s.worst_second)),
+            Some(s) => stats.rejected.push((c.path.clone(), s.worst_second)),
+        }
+    }
+    stats.passed = picked.len();
+    Ok((picked, stats))
+}
+
+/// Rank one profile on an existing scorer.
+pub fn rank_on(scorer: &mut PresetScorer, packs: &Packs, profile: &str, n: usize) -> Result<(Profile, RankStats)> {
+    let cands = eligible(packs, profile)?;
+    let (h0, r0) = (scorer.hits, scorer.rendered);
+    let (picked, mut stats) = select(&cands, n, FLASH_CEILING, |c| scorer.score(&c.path))?;
+    stats.cache_hits = scorer.hits - h0;
+    stats.rendered = scorer.rendered - r0;
+    let shortfall = n - picked.len();
+    let (presets, worst_second) = picked.into_iter().unzip();
+    Ok((Profile { name: profile.to_string(), presets, worst_second, shortfall }, stats))
+}
+
+/// THE SWITCH. `false`: `rank` and `Manifest::generate` take the first `n` eligible presets
+/// exactly as before, render nothing, and leave `presets/profiles.toml` valid. Set to `true`
+/// (then bump nothing else) to apply the WCAG flash ceiling lazily during ranking, record
+/// each preset's `worst_second` in the manifest, and then regenerate it with
+/// `cargo run --release -- rank presets/profiles.toml`.
+pub const FLASH_CEILING_ENABLED: bool = false;
+
+/// The first `n` eligible presets, no flash scoring: the ranking before the ceiling existed.
+pub fn rank_unscored(packs: &Packs, profile: &str, n: usize) -> Result<(Profile, RankStats)> {
+    let cands = eligible(packs, profile)?;
+    let stats = RankStats { eligible: cands.len(), examined: n.min(cands.len()), passed: n.min(cands.len()), ..RankStats::default() };
+    let presets = cands.into_iter().take(n).map(|c| c.path).collect();
+    Ok((Profile { name: profile.to_string(), presets, worst_second: Vec::new(), shortfall: 0 }, stats))
+}
+
+pub fn rank_report(packs: &Packs, profile: &str, n: usize) -> Result<(Profile, RankStats)> {
+    genre(profile).ok_or_else(|| Error::msg(format!("unknown profile {profile:?}; expected one of {}", PROFILES.join(", "))))?;
+    if !FLASH_CEILING_ENABLED {
+        return rank_unscored(packs, profile, n);
+    }
+    with_scorer(packs, |s| rank_on(s, packs, profile, n))
+}
+
+/// The first `n` presets of the profile that clear the flash ceiling, best first.
 pub fn rank(packs: &Packs, profile: &str, n: usize) -> Result<Profile> {
-    let presets = eligible(packs, profile)?.into_iter().take(n).map(|c| c.path).collect();
-    Ok(Profile { name: profile.to_string(), presets })
+    rank_report(packs, profile, n).map(|(p, _)| p)
 }
 
 #[cfg(test)]

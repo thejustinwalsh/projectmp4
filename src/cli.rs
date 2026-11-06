@@ -79,7 +79,7 @@ struct PlanCmd {
     #[arg(long)]
     no_flash_guard: bool,
     /// Most relative luminance (fraction of maximum) any region may travel per
-    /// second under the flash guard, below 0.60. Flashes per second are bounded
+    /// second under the flash guard, below 0.54 (0.60 is the exact WCAG threshold). Flashes per second are bounded
     /// by rate / 0.20 at every fps; the 0.48 default gives 2.4.
     #[arg(long, default_value_t = crate::render::flash::DEFAULT_RATE, value_parser = parse_flash_rate)]
     flash_rate: f32,
@@ -173,10 +173,22 @@ fn init() -> Result<()> {
 
 fn rank(out: &std::path::Path) -> Result<()> {
     let packs = Packs::ensure(&default_cache_dir()?)?;
-    let m = Manifest::generate(&packs, PRESETS_PER_PROFILE)?;
+    let (m, stats) = Manifest::generate_report(&packs, PRESETS_PER_PROFILE)?;
     m.save(out)?;
-    for p in &m.profiles {
-        println!("{:<10} {} presets", p.name, p.presets.len());
+    for (p, s) in m.profiles.iter().zip(&stats) {
+        println!(
+            "{:<10} {} presets (short {}); eligible {}, examined {} ({} cached, {} rendered), passed {}, over ceiling {}, unloadable {}",
+            p.name,
+            p.presets.len(),
+            p.shortfall,
+            s.eligible,
+            s.examined,
+            s.cache_hits,
+            s.rendered,
+            s.passed,
+            s.rejected.len(),
+            s.unloadable.len()
+        );
     }
     println!("wrote {}", out.display());
     Ok(())

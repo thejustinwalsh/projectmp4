@@ -62,6 +62,11 @@ impl Packs {
         })
     }
 
+    /// The directory the packs were cloned into; derived data (the flash score cache) lives beside them.
+    pub fn cache_dir(&self) -> Result<&Path> {
+        self.cotc.parent().ok_or_else(|| Error::msg("pack root has no parent directory"))
+    }
+
     pub fn bltc(&self) -> PathBuf {
         self.classic.join("bltc201")
     }
