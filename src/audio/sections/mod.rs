@@ -2,6 +2,7 @@
 
 pub mod gguf;
 pub mod schema;
+pub mod spectrogram;
 
 pub use gguf::Weights;
 pub use schema::SCHEMA;

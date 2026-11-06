@@ -1746,6 +1746,7 @@ dependencies = [
  "glutin",
  "image",
  "resvg",
+ "rustfft",
  "serde_json",
  "sha2",
  "winit",
