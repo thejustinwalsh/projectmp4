@@ -23,8 +23,8 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] }
 glutin = { version = "=0.32.3", default-features = false }
 cpal = "=0.16.0"
-deck-track-analysis = { path = "/Users/tjw/Developer/agent-deck/native/track-analysis" }
-deck-media-codec = { path = "/Users/tjw/Developer/agent-deck/native/media-codec" }
+deck-track-analysis = { path = "crates/track-analysis" }
+deck-media-codec = { path = "crates/media-codec" }
 
 [build-dependencies]
 cmake = "0.1"

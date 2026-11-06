@@ -1,0 +1,23 @@
+[package]
+name = "deck-track-analysis"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+beat-this = { version = "=1.1.0", default-features = false }
+deck-media-codec = { path = "../media-codec" }
+rustfft = "=6.4.1"
+serde_json = "1"
+sha2 = "=0.10.9"
+
+[build-dependencies]
+cc = "=1.2.62"
+
+[profile.release]
+lto = true
+strip = true

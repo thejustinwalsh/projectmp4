@@ -1,0 +1,41 @@
+{
+  "scope": "feature-input search/pruning/scoring only",
+  "cases": [
+    {
+      "case": "repeat-pruned",
+      "beforePruning": 2137,
+      "candidates": 994,
+      "maxAbsError": 1.4432899320127035e-15
+    },
+    {
+      "case": "repeat-unpruned",
+      "beforePruning": 2088,
+      "candidates": 2088,
+      "maxAbsError": 1.3322676295501878e-15
+    },
+    {
+      "case": "edge-padding",
+      "beforePruning": 9,
+      "candidates": 9,
+      "maxAbsError": 1.1102230246251565e-16
+    },
+    {
+      "case": "single-weight",
+      "beforePruning": 8,
+      "candidates": 8,
+      "maxAbsError": 2.220446049250313e-16
+    },
+    {
+      "case": "silence-features",
+      "beforePruning": 76,
+      "candidates": 76,
+      "maxAbsError": 0
+    },
+    {
+      "case": "dissimilar",
+      "beforePruning": 0,
+      "candidates": 0,
+      "maxAbsError": 0
+    }
+  ]
+}

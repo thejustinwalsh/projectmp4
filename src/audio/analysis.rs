@@ -21,7 +21,8 @@ pub struct Analysis {
 }
 
 /// Default location of the analysis models.
-pub const DEFAULT_MODELS: &str = "/Users/tjw/Developer/agent-deck/native/track-analysis/models";
+pub const DEFAULT_MODELS: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/crates/track-analysis/models");
 
 /// Root of agent-deck's data directory (the one containing `analysis/`).
 ///

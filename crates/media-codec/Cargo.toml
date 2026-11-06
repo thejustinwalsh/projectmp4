@@ -1,0 +1,17 @@
+[package]
+name = "deck-media-codec"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+symphonia = { version = "=0.6.1", default-features = false, features = ["isomp4", "ogg", "pcm", "wav"] }
+symphonia-adapter-libopus = "=0.3.0"
+ebur128 = "=0.1.10"
+serde_json = "1"
+
+[profile.release]
+lto = true
