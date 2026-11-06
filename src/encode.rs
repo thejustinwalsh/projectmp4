@@ -54,9 +54,10 @@ const MARGIN: f64 = 0.92;
 /// Below this, 1080p60 of this content falls apart.
 const FLOOR_KBPS: f64 = 6000.0;
 /// Measured CRF 17 average on a real full track (16.03 Mb/s).
-#[allow(dead_code)]
-const CRF_KBPS: f64 = 16030.0;
-/// Budgets above this: CRF is cheaper than the cap, so keep CRF.
+pub const CRF_KBPS: f64 = 16030.0;
+/// Budgets above this: CRF is cheaper than the cap, so keep CRF. Derived from
+/// `CRF_KBPS`: 16030 * 1.25 = 20037.5, rounded to 20000. That is CRF's measured
+/// cost plus 25% headroom for content costlier than the one measured.
 const CAP_CRF_AT: f64 = 20000.0;
 /// X's free-account duration limit.
 const X_MAX_SECONDS: f64 = 140.0;
@@ -96,7 +97,9 @@ pub fn video_bitrate_kbps(target: Target, duration_s: f64, audio_kbps: u32) -> R
         )));
     }
     // Down, never up: rounding up spends margin we do not have.
-    Ok(Some(budget.floor() as u32))
+    // Never ask for more than CRF 17 would spend: between the CRF cost and
+    // CAP_CRF_AT a cap at the full budget would inflate the file.
+    Ok(Some(budget.min(CRF_KBPS).floor() as u32))
 }
 
 pub struct Encoder {
