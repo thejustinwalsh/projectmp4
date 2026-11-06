@@ -389,10 +389,10 @@ fn resolve_pool(args: &RenderArgs) -> Result<(Vec<PathBuf>, Option<PathBuf>)> {
     Ok((pool, Some(packs.textures)))
 }
 
-/// The flash rate is relative luminance per second. It must be strictly below
-/// 0.60: the guard bounds flashes per second by `rate / 0.20` (a flash needs
-/// 0.10 of travel each way), so 0.60 permits exactly 3.0, the WCAG threshold,
-/// rather than under it.
+/// The flash rate is relative luminance per second. The guard bounds flashes
+/// per second by `rate / 0.20` (a flash needs 0.10 of travel each way), so 0.60
+/// is the exact WCAG threshold (3.0 per second); the ceiling is 0.54, which
+/// leaves 10% headroom.
 pub fn check_flash_rate(r: f32) -> Result<()> {
     use crate::render::flash::{DEFAULT_RATE, MAX_RATE};
     if r.is_finite() && (0.001..MAX_RATE).contains(&r) {
@@ -400,8 +400,8 @@ pub fn check_flash_rate(r: f32) -> Result<()> {
     } else {
         Err(Error::msg(format!(
             "--flash-rate must be at least 0.001 and below {MAX_RATE} (measured default {DEFAULT_RATE}), got {r}: \
-             a rate of {MAX_RATE}/s permits exactly {MAX_RATE}/0.20 = 3.0 flashes per second, which is the WCAG \
-             threshold rather than under it"
+             a rate of 0.60/s permits exactly 0.60/0.20 = 3.0 flashes per second, which is the WCAG \
+             threshold itself; below {MAX_RATE} leaves 10% headroom under it"
         )))
     }
 }

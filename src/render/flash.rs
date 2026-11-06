@@ -16,27 +16,23 @@ pub const FLASH_DARK: f32 = 0.80;
 /// More than this many flashes in any one-second window fails WCAG 2.3.1.
 pub const FLASH_LIMIT_PER_SECOND: usize = 3;
 /// Default maximum travel of relative luminance per second in any region
-/// (0.008 per frame at 60 fps). The bound it gives is `rate / 0.20` = 2.4
-/// flashes per second at every frame rate.
+/// (0.008 per frame at 60 fps). Gives at most `rate / 0.20` = 2.4 flashes per
+/// second at every frame rate, under the non-overlapping count of
+/// [`count_flashes`].
 pub const DEFAULT_RATE: f32 = 0.48;
-/// A rate of exactly this permits exactly 3.0 flashes per second, the
-/// threshold rather than under it, so the rate must be strictly below it.
-pub const MAX_RATE: f32 = 0.60;
+/// Rates at or above this are rejected. 0.60 is the exact threshold (0.60 / 0.20
+/// = 3.0 flashes per second); 0.54 leaves 10% headroom under it.
+pub const MAX_RATE: f32 = 0.54;
+/// The smallest region WCAG counts: 25% of a 10-degree visual field at about
+/// 3 picture heights is ~70,700 px^2 at 1080p, a square of about 266 px. For
+/// other frame heights the side scales with the height.
+pub const WCAG_WINDOW_PX: usize = 266;
 
-/// The frame is divided into GRID x GRID cells, each constrained separately.
-/// At 1920x1080 a cell is 240x135 = 32,400 px^2. WCAG's area condition is 25%
-/// of a 10-degree field: at about 3 picture heights that is ~600 px across,
-/// ~283,000 px^2, a quarter of it ~70,700 px^2 (about 266x266). A 4x4 grid
-/// (480x270 = 129,600 px^2) was nearly twice that, so one cell could flash
-/// alone and fail; 8x8 is comfortably under.
-const GRID: usize = 8;
-/// Every cell carries the same per-frame delta as the frame mean. A mean of
-/// cells each within +/- delta is itself within +/- delta, so any union of
-/// whole cells, and so any region that size or larger, inherits the bound.
-/// (A region not aligned to the grid can exceed it by at most the ratio of
-/// the cell it sits in to the part of that cell it covers.) The frame-mean
-/// constraint is therefore implied; it is kept because it is nearly free.
-const CELL_ALLOWANCE: f32 = 1.0;
+/// Side of the square window the guard bounds, for a `w`x`h` frame.
+pub fn window_side(w: usize, h: usize) -> usize {
+    ((WCAG_WINDOW_PX as f64 * h as f64 / 1080.0).round() as usize).clamp(1, w.min(h))
+}
+
 const ENC_STEPS: usize = 4096;
 
 fn srgb_decode(b: u8) -> f32 {
@@ -110,8 +106,9 @@ pub fn region_luma(px: &[u8], w: usize, h: usize, cols: usize, rows: usize) -> V
 /// Turning points are found with a hysteresis of `FLASH_DELTA`, so a leg with
 /// jitter in it is still one leg. Each consecutive triple of turning points
 /// `(a, b, c)` that is a flash is reported at the index of `c`, the frame that
-/// completes it. Overlapping triples count separately, which is the stricter
-/// reading: a sustained oscillation of N legs yields N-1.
+/// completes it. Triples do not overlap: a matched one is consumed and the
+/// scan resumes from its end, so a sustained oscillation of N legs yields N/2
+/// flashes, one per cycle.
 pub fn count_flashes(series: &[f32]) -> Vec<usize> {
     let t = FLASH_DELTA - 1e-6;
     let Some(&first) = series.first() else { return Vec::new() };
@@ -163,11 +160,18 @@ pub fn count_flashes(series: &[f32]) -> Vec<usize> {
         ext.push(cand);
     }
     let mut out = Vec::new();
-    for w in ext.windows(3) {
-        let (a, b, c) = (w[0].1, w[1].1, w[2].1);
+    // Non-overlapping: a matched triple is consumed and the scan resumes from
+    // its last turning point, so a zigzag of N legs yields N/2 flashes (one per
+    // oscillation cycle), which is what "3 flashes per second" means.
+    let mut k = 0;
+    while k + 2 < ext.len() {
+        let (a, b, c) = (ext[k].1, ext[k + 1].1, ext[k + 2].1);
         let opposing = (b - a) * (c - b) < 0.0;
         if opposing && (b - a).abs() >= t && (c - b).abs() >= t && a.min(b).min(c) < FLASH_DARK {
-            out.push(w[2].0);
+            out.push(ext[k + 2].0);
+            k += 2;
+        } else {
+            k += 1;
         }
     }
     out
@@ -217,20 +221,38 @@ pub fn windows_over_limit(series_len: usize, flashes: &[usize], fps: u32) -> (us
 /// Limits luminance change so output stays under the photosensitive-seizure
 /// threshold. See the module docs.
 ///
-/// The bound. Luminance in any region can travel at most `rate` per second
-/// (`delta = rate / fps` per frame). One WCAG flash consumes at least 0.20 of
-/// travel (two legs of >= 0.10), so flashes per second <= `rate / 0.20`,
-/// independent of fps. At `rate = 0.48` that is 2.4. A rate of 0.60 gives
-/// exactly 3.0, the threshold, which is why it is rejected.
+/// Per frame, the guard blends the incoming frame into its previous output,
+/// in linear light, with one scalar `alpha <= 1` chosen so that the mean
+/// luminance of the whole frame and of EVERY square window of the WCAG area
+/// size ([`window_side`], about 266 px at 1080p) moves by at most
+/// `delta = rate / fps`. Blending is linear in every region, so one scalar
+/// satisfies all windows. A summed-area table over the per-pixel luminance
+/// change gives every window mean in O(1), so the scan is O(pixels). Any
+/// region WCAG counts contains a full window, so it is bounded at any position
+/// and alignment.
+///
+/// The bound. Luminance in any region travels at most `rate` per second. One
+/// WCAG flash is a pair of opposing changes of at least 0.10 each, so it
+/// consumes at least 0.20 of travel, and flashes per second <= `rate / 0.20`,
+/// independent of fps: 2.4 at the default 0.48. This assumes (1) the
+/// non-overlapping count of [`count_flashes`] (an overlapping count charges
+/// each flash one leg, 0.10, and would double the bound), and (2) that the
+/// state is held in float, so travel is exactly `rate` with no rounding bias.
+///
+/// The previous output is kept as `f32` linear RGB, never re-read from bytes.
+/// The byte buffer handed back is a quantised view of that state. A delta
+/// smaller than one 8-bit step therefore accumulates in float instead of
+/// rounding to nothing, so the picture never freezes at any frame rate.
 pub struct FlashGuard {
     w: usize,
     h: usize,
     /// Per-frame delta: `rate / fps`.
-    limit: f32,
-    /// The previous output frame; empty before the first frame.
-    prev: Vec<u8>,
-    prev_sums: Vec<f64>,
-    counts: Vec<u64>,
+    delta: f32,
+    win: usize,
+    /// Previous output, linear RGB, `w*h*3`; empty before the first frame.
+    prev: Vec<f32>,
+    /// Summed-area table of the luminance change, `(w+1)*(h+1)`.
+    sat: Vec<f64>,
     engaged: u64,
     min_alpha: f32,
 }
@@ -239,36 +261,43 @@ impl FlashGuard {
     /// `rate_per_second` is the most relative luminance any region may travel
     /// in one second; the per-frame delta is `rate_per_second / fps`.
     pub fn new(w: usize, h: usize, fps: u32, rate_per_second: f32) -> FlashGuard {
-        assert!(w >= GRID && h >= GRID, "frame {w}x{h} is smaller than the {GRID}x{GRID} grid");
+        assert!(w >= 8 && h >= 8, "frame {w}x{h} is too small to guard");
         assert!(fps > 0, "fps must be positive");
         assert!(rate_per_second > 0.0 && rate_per_second.is_finite(), "flash rate must be positive, got {rate_per_second}");
-        let limit = rate_per_second / fps as f32;
-        FlashGuard { w, h, limit, prev: Vec::new(), prev_sums: Vec::new(), counts: Vec::new(), engaged: 0, min_alpha: 1.0 }
+        FlashGuard {
+            w,
+            h,
+            delta: rate_per_second / fps as f32,
+            win: window_side(w, h),
+            prev: Vec::new(),
+            sat: Vec::new(),
+            engaged: 0,
+            min_alpha: 1.0,
+        }
     }
 
     /// Change the frame size (a resized window). The previous output is
     /// resampled, so the next frame is still limited against it.
     pub fn resize(&mut self, w: usize, h: usize) {
-        assert!(w >= GRID && h >= GRID, "frame {w}x{h} is smaller than the {GRID}x{GRID} grid");
+        assert!(w >= 8 && h >= 8, "frame {w}x{h} is too small to guard");
         if (w, h) == (self.w, self.h) {
             return;
         }
         if !self.prev.is_empty() {
-            let mut n = vec![0u8; w * h * 4];
+            let mut n = vec![0f32; w * h * 3];
             for y in 0..h {
                 let sy = y * self.h / h;
                 for x in 0..w {
                     let sx = x * self.w / w;
-                    n[(y * w + x) * 4..(y * w + x) * 4 + 4].copy_from_slice(&self.prev[(sy * self.w + sx) * 4..(sy * self.w + sx) * 4 + 4]);
+                    n[(y * w + x) * 3..(y * w + x) * 3 + 3].copy_from_slice(&self.prev[(sy * self.w + sx) * 3..(sy * self.w + sx) * 3 + 3]);
                 }
             }
-            let (sums, counts) = cell_sums(&n, w, h, GRID, GRID);
             self.prev = n;
-            self.prev_sums = sums;
-            self.counts = counts;
         }
         self.w = w;
         self.h = h;
+        self.win = window_side(w, h);
+        self.sat = Vec::new();
     }
 
     /// Limit `px` (RGBA, `w*h*4`) against the previous output in place and
@@ -277,47 +306,75 @@ impl FlashGuard {
     pub fn limit(&mut self, px: &mut [u8]) -> f32 {
         let (w, h) = (self.w, self.h);
         assert_eq!(px.len(), w * h * 4, "frame is {} bytes, expected {}", px.len(), w * h * 4);
-        let (sums, counts) = cell_sums(px, w, h, GRID, GRID);
-        if self.prev.is_empty() {
-            self.prev = px.to_vec();
-            self.prev_sums = sums;
-            self.counts = counts;
-            return 1.0;
-        }
-        let total: u64 = self.counts.iter().sum();
-        let mean = |s: &[f64]| s.iter().sum::<f64>() / total as f64;
-        let mut alpha = 1.0f64;
-        let mut bound = |delta: f64, change: f64| {
-            if change > delta {
-                alpha = alpha.min(delta / change);
-            }
-        };
-        bound(self.limit as f64, (mean(&sums) - mean(&self.prev_sums)).abs());
-        for i in 0..sums.len() {
-            let n = self.counts[i] as f64;
-            bound((self.limit * CELL_ALLOWANCE) as f64, (sums[i] / n - self.prev_sums[i] / n).abs());
-        }
-        if alpha >= 1.0 {
-            self.prev.copy_from_slice(px);
-            self.prev_sums = sums;
-            return 1.0;
-        }
-        let a = alpha as f32;
         let dec = srgb_to_linear_lut();
+        if self.prev.is_empty() {
+            self.prev = vec![0f32; w * h * 3];
+            self.absorb(px);
+            return 1.0;
+        }
+        let stride = w + 1;
+        if self.sat.len() != stride * (h + 1) {
+            self.sat = vec![0f64; stride * (h + 1)];
+        }
+        // Pass 1: summed-area table of the per-pixel luminance change.
+        for y in 0..h {
+            let row = &px[y * w * 4..(y + 1) * w * 4];
+            let prow = &self.prev[y * w * 3..(y + 1) * w * 3];
+            let mut run = 0f64;
+            for x in 0..w {
+                let (i, j) = (x * 4, x * 3);
+                let l_in = 0.2126 * dec[row[i] as usize] + 0.7152 * dec[row[i + 1] as usize] + 0.0722 * dec[row[i + 2] as usize];
+                let l_pv = 0.2126 * prow[j] + 0.7152 * prow[j + 1] + 0.0722 * prow[j + 2];
+                run += (l_in - l_pv) as f64;
+                self.sat[(y + 1) * stride + x + 1] = self.sat[y * stride + x + 1] + run;
+            }
+        }
+        // The whole frame, and the largest window mean anywhere.
+        let mut worst = (self.sat[h * stride + w] / (w * h) as f64).abs();
+        let (sx, sy) = (self.win, self.win);
+        let (stride_x, stride_y) = (1, 1);
+        let area = (sx * sy) as f64;
+        let mut y = 0;
+        while y + sy <= h {
+            let (a, b) = (y * stride, (y + sy) * stride);
+            let mut x = 0;
+            while x + sx <= w {
+                let v = (self.sat[b + x + sx] - self.sat[a + x + sx] - self.sat[b + x] + self.sat[a + x]).abs() / area;
+                if v > worst {
+                    worst = v;
+                }
+                x += stride_x;
+            }
+            y += stride_y;
+        }
+        let delta = self.delta as f64;
+        if worst <= delta {
+            self.absorb(px);
+            return 1.0;
+        }
+        let a = (delta / worst) as f32;
         let enc = encode_lut();
         let top = (ENC_STEPS - 1) as f32;
-        for (o, p) in px.chunks_exact_mut(4).zip(self.prev.chunks_exact(4)) {
+        for (o, p) in px.chunks_exact_mut(4).zip(self.prev.chunks_exact_mut(3)) {
             for c in 0..3 {
-                let l = a * dec[o[c] as usize] + (1.0 - a) * dec[p[c] as usize];
-                o[c] = enc[(l * top + 0.5) as usize];
+                let st = p[c] + a * (dec[o[c] as usize] - p[c]);
+                p[c] = st;
+                o[c] = enc[((st * top + 0.5) as usize).min(ENC_STEPS - 1)];
             }
         }
-        self.prev.copy_from_slice(px);
-        // Recomputed from the bytes actually emitted, so quantisation never accumulates.
-        self.prev_sums = cell_sums(px, w, h, GRID, GRID).0;
         self.engaged += 1;
         self.min_alpha = self.min_alpha.min(a);
         a
+    }
+
+    /// Take `px` as the new state, untouched.
+    fn absorb(&mut self, px: &[u8]) {
+        let dec = srgb_to_linear_lut();
+        for (o, p) in px.chunks_exact(4).zip(self.prev.chunks_exact_mut(3)) {
+            for c in 0..3 {
+                p[c] = dec[o[c] as usize];
+            }
+        }
     }
 
     /// Frames on which the guard changed anything.

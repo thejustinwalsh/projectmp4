@@ -70,3 +70,8 @@ pub fn square_luma(f: &[u8], w: usize, x0: usize, y0: usize, size: usize) -> f32
     }
     projectmp4::render::flash::region_luma(&crop, size, size, 1, 1)[0]
 }
+
+/// Relative luminance of a grey byte.
+pub fn lin(byte: u8) -> f32 {
+    projectmp4::render::flash::srgb_to_linear_lut()[byte as usize]
+}
