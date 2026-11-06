@@ -1,6 +1,7 @@
 //! Command line: `init`, `rank`, `preview`, `render`.
 
 use crate::audio::DriverKind;
+use crate::encode::Target;
 use crate::ffi::{Error, Result};
 use crate::presets::{default_cache_dir, Manifest, Packs};
 use crate::render::plan::{render_plan, RenderArgs};
@@ -111,6 +112,10 @@ struct RenderCmd {
     /// Hardware encode (VideoToolbox): faster, larger.
     #[arg(long)]
     fast: bool,
+    /// Fit the output to where it is going: none, discord (500 MB), x (512 MB, 140 s)
+    /// or youtube. Capped targets use a single-pass bitrate sized from the track length.
+    #[arg(long, default_value = "none", value_parser = parse_target)]
+    target: Target,
     /// Output path. Default: <input name>.mp4 in the current directory.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -129,6 +134,10 @@ fn parse_flash_rate(s: &str) -> std::result::Result<f32, String> {
     let v: f32 = s.parse().map_err(|_| format!("{s:?} is not a number"))?;
     crate::render::plan::check_flash_rate(v).map_err(|e| e.0.into_owned())?;
     Ok(v)
+}
+
+fn parse_target(s: &str) -> std::result::Result<Target, String> {
+    Target::parse(s).map_err(|e| e.0.into_owned())
 }
 
 fn parse_driver(s: &str) -> std::result::Result<DriverKind, String> {
@@ -197,6 +206,7 @@ fn rank(out: &std::path::Path) -> Result<()> {
 fn render_cmd(c: RenderCmd) -> Result<()> {
     let mut a = c.plan.args();
     a.fast = c.fast;
+    a.target = c.target;
     a.out = c.out;
     a.progress = true;
     if let Some(path) = c.dump_plan {

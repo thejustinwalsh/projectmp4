@@ -7,6 +7,7 @@ use crate::audio::analysis::DEFAULT_MODELS;
 use crate::audio::normalise::{wav_frames, PIPELINE_RATE};
 use crate::audio::timeline::{plan_switches_reporting, Cut, SwitchPoint};
 use crate::audio::{analyse_outcome, normalise, Analysis, Driver, DriverKind, Outcome};
+use crate::encode::{video_bitrate_kbps, Target, AUDIO_KBPS};
 use crate::ffi::{Error, Result};
 use crate::presets::{default_cache_dir, Manifest, Packs};
 use crate::render::MarkStyle;
@@ -44,6 +45,8 @@ pub struct RenderArgs {
     pub static_overlay: bool,
     /// Hardware (VideoToolbox) encode instead of libx264.
     pub fast: bool,
+    /// Size goal for the output; resolved to a bitrate before rendering starts.
+    pub target: Target,
     /// Limit frame-to-frame luminance change (WCAG 2.3.1). On unless disabled.
     pub flash_guard: bool,
     /// Most relative luminance any region may travel per second under the guard.
@@ -71,6 +74,7 @@ impl RenderArgs {
             watermark_style: MarkStyle::Word,
             static_overlay: false,
             fast: false,
+            target: Target::None,
             flash_guard: true,
             flash_rate: crate::render::flash::DEFAULT_RATE,
             out: None,
@@ -107,6 +111,9 @@ pub struct RenderPlan {
     pub watermark_style: MarkStyle,
     pub static_overlay: bool,
     pub fast: bool,
+    pub target: Target,
+    /// Video bitrate the target resolved to for `duration`; `None` is CRF 17.
+    pub bitrate_kbps: Option<u32>,
     pub flash_guard: bool,
     pub flash_rate: f32,
     /// Pinned commit of the preset pack the pool was resolved against.
@@ -138,6 +145,8 @@ impl RenderPlan {
             "watermark_style": match self.watermark_style { MarkStyle::Word => "word", MarkStyle::Sigil => "sigil" },
             "static_overlay": self.static_overlay,
             "fast": self.fast,
+            "target": self.target.name(),
+            "bitrate_kbps": self.bitrate_kbps,
             "flash_guard": self.flash_guard,
             // Rounded so an f32 like 0.010 reads back as 0.01, not 0.009999999776.
             "flash_rate": (self.flash_rate as f64 * 1e6).round() / 1e6,
@@ -213,6 +222,14 @@ impl RenderPlan {
             },
             static_overlay: v.get("static_overlay").and_then(Value::as_bool).unwrap_or(false),
             fast: v.get("fast").and_then(Value::as_bool).unwrap_or(false),
+            target: match str_of("target") {
+                None => Target::None,
+                Some(t) => Target::parse(&t).map_err(|_| bad("target"))?,
+            },
+            bitrate_kbps: match v.get("bitrate_kbps") {
+                None | Some(Value::Null) => None,
+                Some(x) => Some(x.as_u64().and_then(|k| u32::try_from(k).ok()).ok_or_else(|| bad("bitrate_kbps"))?),
+            },
             // A plan from before the guard existed replays with it on: safe by default.
             flash_guard: v.get("flash_guard").and_then(Value::as_bool).unwrap_or(true),
             flash_rate: match v.get("flash_rate") {
@@ -290,6 +307,10 @@ pub fn render_plan_from_source(args: &RenderArgs, src: crate::audio::Source) -> 
 fn prepare_with(args: &RenderArgs, tmp: TempDir, src: crate::audio::Source) -> Result<Prepared> {
     let frames = require_samples(wav_frames(&src.wav)?, &args.input)?;
     let wav_secs = frames as f64 / PIPELINE_RATE as f64;
+    // Fail before the minutes of analysis and the hours of rendering: an
+    // impossible size target is known from the length alone.
+    let shown = args.limit_seconds.map_or(wav_secs, |l| l.min(wav_secs));
+    let bitrate_kbps = video_bitrate_kbps(args.target, shown, AUDIO_KBPS)?;
     // Beatless music (an ambient pad) gives the analyser nothing to find. That
     // is not a reason to refuse the track: switch on a fixed grid instead.
     // That applies only to an analyser that ran and found no beats. One that
@@ -322,9 +343,7 @@ fn prepare_with(args: &RenderArgs, tmp: TempDir, src: crate::audio::Source) -> R
     // WAV, so its length, not the stems', sets the video length. Stems can be
     // shorter (ravezilla: 8,277,120 vs 8,277,768 frames) or, in principle,
     // longer; the driver reads zeros past its end.
-    let duration = wav_secs;
     // The tiny subtraction keeps an exact multiple (12.0 s * 60) from rounding up a frame.
-    let shown = args.limit_seconds.map_or(duration, |l| l.min(duration));
     let total_frames = (shown * args.fps as f64 - 1e-9).ceil().max(1.0) as u64;
     // A switch the render never reaches is not part of the plan.
     switches.retain(|s| s.t < shown);
@@ -344,6 +363,8 @@ fn prepare_with(args: &RenderArgs, tmp: TempDir, src: crate::audio::Source) -> R
         watermark_style: args.watermark_style,
         static_overlay: args.static_overlay,
         fast: args.fast,
+        target: args.target,
+        bitrate_kbps,
         flash_guard: args.flash_guard,
         flash_rate: args.flash_rate,
         // Only a pool resolved from the packs has a pack revision to record.

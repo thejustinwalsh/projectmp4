@@ -33,6 +33,8 @@ fn plan_of(pool_len: usize, switches: &[(f64, Cut)], fps: u32) -> RenderPlan {
         watermark_style: MarkStyle::Word,
         static_overlay: false,
         fast: false,
+        target: projectmp4::encode::Target::None,
+        bitrate_kbps: None,
         flash_guard: true,
         flash_rate: 0.48,
         packs_revision: None,
@@ -482,3 +484,18 @@ fn fill_output_serves_a_mono_device_the_left_channel() {
     assert_eq!(out, vec![1.0, 2.0]);
 }
 
+
+#[test]
+fn a_dumped_plan_records_and_replays_its_size_target() {
+    let mut p = plan_of(3, &[], 60);
+    p.target = projectmp4::encode::Target::Discord;
+    p.bitrate_kbps = Some(12_010);
+    let back = RenderPlan::from_json(&p.to_json()).unwrap();
+    assert_eq!((back.target, back.bitrate_kbps), (p.target, p.bitrate_kbps));
+    // A plan from before targets existed replays uncapped.
+    let mut v: serde_json::Value = serde_json::from_str(&p.to_json()).unwrap();
+    v.as_object_mut().unwrap().remove("target");
+    v.as_object_mut().unwrap().remove("bitrate_kbps");
+    let old = RenderPlan::from_json(&v.to_string()).unwrap();
+    assert_eq!((old.target, old.bitrate_kbps), (projectmp4::encode::Target::None, None));
+}

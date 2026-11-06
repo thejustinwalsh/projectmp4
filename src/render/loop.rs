@@ -290,7 +290,7 @@ fn run(args: &RenderArgs, prep: &Prepared) -> Result<RenderReport> {
         pm.set_texture_search_paths(&[t.as_path()])?;
     }
 
-    let mut enc = Encoder::start(&out, &prep.wav, WIDTH, HEIGHT, fps, plan.fast)?;
+    let mut enc = Encoder::start(&out, &prep.wav, WIDTH, HEIGHT, fps, plan.fast, plan.bitrate_kbps)?;
     let mut list = Playlist {
         pool: &plan.pool,
         cursor: 0,

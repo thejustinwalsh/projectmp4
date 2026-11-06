@@ -13,6 +13,92 @@ use crate::presets::packs::pid_alive;
 /// How much of ffmpeg's stderr is kept for error messages.
 const STDERR_TAIL: usize = 8 * 1024;
 
+/// Where the output is going, which decides how many bytes it may cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Target {
+    /// No size goal: constant quality (CRF 17).
+    #[default]
+    None,
+    /// Discord Nitro: 500 MB.
+    Discord,
+    /// X: 512 MB and 140 s.
+    X,
+    /// YouTube takes what it is given.
+    YouTube,
+}
+
+impl Target {
+    pub fn name(self) -> &'static str {
+        match self {
+            Target::None => "none",
+            Target::Discord => "discord",
+            Target::X => "x",
+            Target::YouTube => "youtube",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<Target> {
+        match s {
+            "none" => Ok(Target::None),
+            "discord" => Ok(Target::Discord),
+            "x" => Ok(Target::X),
+            "youtube" => Ok(Target::YouTube),
+            _ => Err(Error::msg(format!("{s:?} is not a target; expected none, discord, x or youtube"))),
+        }
+    }
+}
+
+/// Fraction of the size cap the video+audio payload may use. Absorbs the
+/// measured +3.2% single-pass VBR overshoot with room.
+const MARGIN: f64 = 0.92;
+/// Below this, 1080p60 of this content falls apart.
+const FLOOR_KBPS: f64 = 6000.0;
+/// Measured CRF 17 average on a real full track (16.03 Mb/s).
+#[allow(dead_code)]
+const CRF_KBPS: f64 = 16030.0;
+/// Budgets above this: CRF is cheaper than the cap, so keep CRF.
+const CAP_CRF_AT: f64 = 20000.0;
+/// X's free-account duration limit.
+const X_MAX_SECONDS: f64 = 140.0;
+/// The mp4 audio bitrate `ffmpeg_args` asks for.
+pub const AUDIO_KBPS: u32 = 256;
+
+/// The video bitrate (kbps) that makes `duration_s` of output fit `target`.
+/// `Ok(None)`: use CRF 17. `Ok(Some(k))`: cap at k kbps. `Err`: impossible.
+pub fn video_bitrate_kbps(target: Target, duration_s: f64, audio_kbps: u32) -> Result<Option<u32>> {
+    if !duration_s.is_finite() || duration_s <= 0.0 {
+        return Err(Error::msg(format!("cannot size a {duration_s} s render for --target {}", target.name())));
+    }
+    let cap_bytes = match target {
+        Target::None | Target::YouTube => return Ok(None),
+        Target::Discord => 500e6,
+        Target::X => {
+            if duration_s > X_MAX_SECONDS {
+                return Err(Error::msg(format!(
+                    "--target x allows {X_MAX_SECONDS:.0} s and this render is {duration_s:.1} s; \
+                     no bitrate fixes a duration limit. Shorten it with --limit-seconds {X_MAX_SECONDS:.0}"
+                )));
+            }
+            512e6
+        }
+    };
+    let budget = cap_bytes * 8.0 * MARGIN / duration_s / 1000.0 - audio_kbps as f64;
+    if budget >= CAP_CRF_AT {
+        return Ok(None);
+    }
+    if budget < FLOOR_KBPS {
+        return Err(Error::msg(format!(
+            "{duration_s:.0} s will not fit --target {} at an acceptable quality: that leaves {:.1} Mb/s for \
+             video, under the {:.0} Mb/s floor for 1080p60. Lower --fps, or use --target youtube",
+            target.name(),
+            budget / 1000.0,
+            FLOOR_KBPS / 1000.0
+        )));
+    }
+    // Down, never up: rounding up spends margin we do not have.
+    Ok(Some(budget.floor() as u32))
+}
+
 pub struct Encoder {
     child: Option<Child>,
     stdin: Option<ChildStdin>,
@@ -60,7 +146,10 @@ fn sweep_orphaned_parts(out: &Path) {
 }
 
 /// The ffmpeg argument vector (without the program name).
-pub fn ffmpeg_args(out: &Path, audio: &Path, w: u32, h: u32, fps: u32, fast: bool) -> Vec<OsString> {
+///
+/// `bitrate_kbps` of `Some(k)` replaces constant quality with a single-pass
+/// capped bitrate; `None` is CRF 17 (videotoolbox: `-q:v 65`).
+pub fn ffmpeg_args(out: &Path, audio: &Path, w: u32, h: u32, fps: u32, fast: bool, bitrate_kbps: Option<u32>) -> Vec<OsString> {
     let mut a: Vec<OsString> = Vec::new();
     // `-y`: without it, a staging file that already exists makes ffmpeg print
     // "already exists. Exiting." and exit 0, which would pass for success.
@@ -79,14 +168,36 @@ pub fn ffmpeg_args(out: &Path, audio: &Path, w: u32, h: u32, fps: u32, fast: boo
     for s in ["-map", "0:v", "-map", "1:a"] {
         a.push(s.into());
     }
+    let rate = bitrate_kbps.map(|k| {
+        let k = k as u64;
+        [
+            "-b:v".to_string(),
+            format!("{k}k"),
+            "-maxrate".to_string(),
+            format!("{}k", k * 12 / 10),
+            "-bufsize".to_string(),
+            format!("{}k", k * 24 / 10),
+        ]
+    });
     if fast {
         // h264_videotoolbox accepts neither -crf nor -preset (it ignores them
-        // silently); -q:v is its quality control.
-        for s in ["-c:v", "h264_videotoolbox", "-q:v", "65"] {
+        // silently); -q:v is its quality control, and it honours a bitrate.
+        for s in ["-c:v", "h264_videotoolbox"] {
             a.push(s.into());
         }
+        match &rate {
+            Some(r) => a.extend(r.iter().map(OsString::from)),
+            None => a.extend(["-q:v", "65"].map(OsString::from)),
+        }
     } else {
-        for s in ["-c:v", "libx264", "-crf", "17", "-preset", "slow"] {
+        for s in ["-c:v", "libx264"] {
+            a.push(s.into());
+        }
+        match &rate {
+            Some(r) => a.extend(r.iter().map(OsString::from)),
+            None => a.extend(["-crf", "17"].map(OsString::from)),
+        }
+        for s in ["-preset", "slow"] {
             a.push(s.into());
         }
     }
@@ -102,11 +213,12 @@ pub fn ffmpeg_args(out: &Path, audio: &Path, w: u32, h: u32, fps: u32, fast: boo
 }
 
 impl Encoder {
-    pub fn start(out: &Path, audio: &Path, w: u32, h: u32, fps: u32, fast: bool) -> Result<Encoder> {
-        Self::start_with_program("ffmpeg", out, audio, w, h, fps, fast)
+    pub fn start(out: &Path, audio: &Path, w: u32, h: u32, fps: u32, fast: bool, bitrate_kbps: Option<u32>) -> Result<Encoder> {
+        Self::start_with_program("ffmpeg", out, audio, w, h, fps, fast, bitrate_kbps)
     }
 
     /// `start` with an explicit ffmpeg-compatible program (a stub, in tests).
+    #[allow(clippy::too_many_arguments)]
     pub fn start_with_program(
         program: &str,
         out: &Path,
@@ -115,9 +227,10 @@ impl Encoder {
         h: u32,
         fps: u32,
         fast: bool,
+        bitrate_kbps: Option<u32>,
     ) -> Result<Encoder> {
         sweep_orphaned_parts(out);
-        Self::start_staged(program, out, &part_path(out), audio, w, h, fps, fast)
+        Self::start_staged(program, out, &part_path(out), audio, w, h, fps, fast, bitrate_kbps)
     }
 
     /// `start_with_program` with a caller-chosen staging path (tests seed it).
@@ -132,6 +245,7 @@ impl Encoder {
         h: u32,
         fps: u32,
         fast: bool,
+        bitrate_kbps: Option<u32>,
     ) -> Result<Encoder> {
         let frame_len = (w as usize)
             .checked_mul(h as usize)
@@ -157,7 +271,7 @@ impl Encoder {
             Err(e) => return Err(Error::msg(format!("cannot clear staging file {}: {e}", part.display()))),
         }
         let mut child = Command::new(program)
-            .args(ffmpeg_args(&part, audio, w, h, fps, fast))
+            .args(ffmpeg_args(&part, audio, w, h, fps, fast, bitrate_kbps))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
