@@ -6,3 +6,4 @@ pub use analysis::{analyse, analyse_outcome, analyse_outcome_with_cache_dir, Ana
 pub mod driver;
 pub use driver::{Driver, DriverKind, MAX_WINDOW_FRAMES};
 pub mod timeline;
+pub mod sections;
