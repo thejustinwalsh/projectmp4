@@ -277,9 +277,20 @@ fn trim_with_a_fade_longer_than_the_clip_is_not_silent() {
 fn trim_refuses_bad_spans_naming_the_values() {
     let dir = Tmp::new("clip-trim-bad");
     let src = flat_wav(&dir, 2 * PIPELINE_RATE as usize);
-    for (s, e, f) in [(f64::NAN, 1.0, 0.1), (0.0, f64::INFINITY, 0.1), (0.0, 1.0, f64::NAN), (0.0, 1.0, -0.5), (-1.0, 1.0, 0.1), (1.0, 1.0, 0.1), (1.5, 1.0, 0.1), (5.0, 6.0, 0.1)] {
+    // (start, end, fade, the one value the error must name)
+    let rows: [(f64, f64, f64, String); 8] = [
+        (f64::NAN, 1.0, 0.1, "NaN".into()),
+        (0.0, f64::INFINITY, 0.1, "inf".into()),
+        (0.0, 1.0, f64::NAN, "NaN".into()),
+        (0.0, 1.0, -0.5, "-0.5".into()),
+        (-1.0, 1.0, 0.1, "-1".into()),
+        (1.0, 1.0, 0.1, "1..1".into()),
+        (1.5, 1.0, 0.1, "1.5..1".into()),
+        (5.0, 6.0, 0.1, "5..6".into()),
+    ];
+    for (s, e, f, named) in rows {
         let err = trim(&src, s, e, f, &dir).unwrap_err().to_string();
-        assert!(err.contains(&format!("{s}")) || err.contains(&format!("{f}")), "({s},{e},{f}): {err}");
+        assert!(err.contains(&named), "({s},{e},{f}) must name {named:?}: {err}");
     }
     assert!(std::fs::read_dir(&*dir).unwrap().filter_map(|e| e.ok()).all(|e| e.path().extension().is_none_or(|x| x != "part")));
 }
@@ -329,4 +340,55 @@ fn a_programmatic_caller_cannot_bypass_the_clip_seconds_check() {
         let e = projectmp4::render::plan::render_plan_from_source(&args, src.clone()).unwrap_err().to_string();
         assert!(e.contains("--clip-seconds") && e.contains(&format!("{v}")), "{e}");
     }
+}
+
+#[test]
+fn trim_of_a_handful_of_frames_is_never_silent() {
+    let dir = Tmp::new("clip-trim-tiny");
+    let src = flat_wav(&dir, 100);
+    for n in 1..=4usize {
+        let s = read_f32(&trim(&src, 10.0 / PIPELINE_RATE as f64, (10 + n) as f64 / PIPELINE_RATE as f64, 1.5, &dir).unwrap().wav);
+        assert_eq!(s.len(), 2 * n);
+        assert!(s.iter().any(|v| *v > 0.5), "{n}-frame clip is silent: {s:?}");
+    }
+}
+
+#[test]
+fn an_impossible_target_is_refused_before_any_stem_work() {
+    let dir = Tmp::new("clip-target");
+    let src = flat_wav(&dir, PIPELINE_RATE as usize);
+    let mut args = projectmp4::render::plan::RenderArgs::new("flat.wav");
+    args.clip = ClipKind::Drop;
+    args.target = Target::X;
+    args.clip_seconds = Some(200.0);
+    let e = projectmp4::render::plan::render_plan_from_source(&args, src).unwrap_err().to_string();
+    assert!(e.contains("--target x allows 140 s") && e.contains("200.0 s"), "{e}");
+}
+
+#[test]
+fn clip_seconds_with_the_full_clip_is_refused() {
+    let dir = Tmp::new("clip-full-seconds");
+    let src = flat_wav(&dir, PIPELINE_RATE as usize);
+    let mut args = projectmp4::render::plan::RenderArgs::new("flat.wav");
+    args.clip_seconds = Some(30.0);
+    let e = projectmp4::render::plan::render_plan_from_source(&args, src).unwrap_err().to_string();
+    assert!(e.contains("--clip-seconds 30") && e.contains("--clip full"), "{e}");
+}
+
+#[test]
+fn a_bad_limit_is_refused_on_the_source_path_too() {
+    let dir = Tmp::new("clip-limit");
+    let src = flat_wav(&dir, PIPELINE_RATE as usize);
+    let mut args = projectmp4::render::plan::RenderArgs::new("flat.wav");
+    args.limit_seconds = Some(-1.0);
+    let e = projectmp4::render::plan::render_plan_from_source(&args, src).unwrap_err().to_string();
+    assert!(e.contains("--limit-seconds") && e.contains("-1"), "{e}");
+}
+
+#[test]
+fn choose_refuses_non_finite_confidence_and_energy() {
+    let s = [sec(0.0, 10.0, CHORUS, f32::NAN)];
+    assert!(choose(&s, &[], &[0.1], None, 90.0, ClipKind::Drop).unwrap_err().to_string().contains("NaN"));
+    let s = [sec(0.0, 10.0, CHORUS, 0.5)];
+    assert!(choose(&s, &[], &[f32::INFINITY], None, 90.0, ClipKind::Drop).unwrap_err().to_string().contains("inf"));
 }

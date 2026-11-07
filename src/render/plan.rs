@@ -316,12 +316,6 @@ pub(crate) fn prepare(args: &RenderArgs) -> Result<Prepared> {
     if !(MIN_FPS..=MAX_FPS).contains(&args.fps) {
         return Err(Error::msg(format!("--fps {} is out of range {MIN_FPS}..={MAX_FPS}", args.fps)));
     }
-    if let Some(l) = args.limit_seconds {
-        check_limit(l)?;
-    }
-    if let Some(c) = args.clip_seconds {
-        check_clip_seconds(c)?;
-    }
     check_flash_rate(args.flash_rate)?;
     let tmp = TempDir::new()?;
     let src = normalise(&args.input, &tmp.0)?;
@@ -336,8 +330,17 @@ pub fn render_plan_from_source(args: &RenderArgs, src: crate::audio::Source) -> 
 }
 
 fn prepare_with(args: &RenderArgs, tmp: TempDir, mut src: crate::audio::Source) -> Result<Prepared> {
+    if let Some(l) = args.limit_seconds {
+        check_limit(l)?;
+    }
     if let Some(c) = args.clip_seconds {
         check_clip_seconds(c)?;
+        if args.clip == ClipKind::Full {
+            return Err(Error::msg(format!(
+                "--clip-seconds {c} has no effect with --clip full, which renders the whole track; \
+                 pass --clip drop or --clip intro, or use --limit-seconds {c} to render the first {c} s"
+            )));
+        }
     }
     let frames = require_samples(wav_frames(&src.wav)?, &args.input)?;
     let mut wav_secs = frames as f64 / PIPELINE_RATE as f64;
@@ -348,9 +351,17 @@ fn prepare_with(args: &RenderArgs, tmp: TempDir, mut src: crate::audio::Source) 
     let mut clip_made = None;
     if args.clip != ClipKind::Full {
         let want = args.clip_seconds.or((args.target == Target::X).then_some(X_TARGET_WANT));
+        // `want` is an upper bound on the span `choose` can return, so a target that
+        // cannot fit `want` cannot fit the clip either: refuse before the stems.
+        if let Some(w) = want {
+            video_bitrate_kbps(args.target, w, AUDIO_KBPS)?;
+        }
         let downbeats = match analyse_outcome(&src, &args.models, Some(wav_secs))? {
             Outcome::Beats(a) => a.downbeats,
-            Outcome::NoBeats(_) => Vec::new(),
+            Outcome::NoBeats(why) => {
+                eprintln!("clip: {why}; the cut will not be snapped to a bar");
+                Vec::new()
+            }
         };
         let chosen = clip::locate(&src.wav, args.clip, want, &downbeats, wav_secs, &tmp.0, args.progress)?;
         src = trim(&src, chosen.start, chosen.end, CLIP_FADE, &tmp.0)?;

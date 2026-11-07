@@ -139,6 +139,13 @@ pub fn choose(
             return Err(Error::msg(format!("choose: section {}..{} is not a forward span", s.start, s.end)));
         }
     }
+    // A NaN would win `best`'s comparison below, so refuse it up front.
+    if let Some(s) = sections.iter().find(|s| !s.confidence.is_finite()) {
+        return Err(Error::msg(format!("choose: section {}..{} has confidence {}", s.start, s.end, s.confidence)));
+    }
+    if let Some(e) = energy.iter().find(|e| !e.is_finite()) {
+        return Err(Error::msg(format!("choose: section energy {e} is not finite")));
+    }
     if kind == ClipKind::Full || sections.is_empty() {
         return Ok(whole(duration));
     }
@@ -224,20 +231,28 @@ pub fn locate(
     let st = stems::separate(&rt, wav, scratch)?;
     let monos = [mono(&st.bass), mono(&st.drums), mono(&st.other), mono(&st.vocals)];
     drop(st);
-    // The energy mix is the sum of the four stems, at 48 kHz.
+    // The stems are in memory; the per-span worker output under `span/` (about
+    // 110 MB per minute of audio) has been read and stitched, so nothing needs
+    // it. Remove it now rather than when the caller's scratch goes, which is
+    // after the whole render. A failure costs disk, not the render.
+    if let Err(e) = std::fs::remove_dir_all(scratch.join("span")) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("clip: cannot remove stem scratch {}: {e}", scratch.join("span").display());
+        }
+    }
+    // The energy mix is the sum of the four stem monos, at 48 kHz.
     let mut mix = vec![0f32; monos[0].len()];
     for m in &monos {
         for (o, v) in mix.iter_mut().zip(m) {
             *o += v;
         }
     }
-    let resampled = [
-        spectrogram::resample_48k_to_44k1(&monos[0])?,
-        spectrogram::resample_48k_to_44k1(&monos[1])?,
-        spectrogram::resample_48k_to_44k1(&monos[2])?,
-        spectrogram::resample_48k_to_44k1(&monos[3])?,
-    ];
-    drop(monos);
+    // One mono at a time, each freed as its resample lands.
+    let mut resampled = Vec::with_capacity(4);
+    for m in monos {
+        resampled.push(spectrogram::resample_48k_to_44k1(&m)?);
+    }
+    let resampled: [Vec<f32>; 4] = resampled.try_into().expect("four stems");
     let (spec, frames) = spectrogram::stack(&resampled)?;
     drop(resampled);
     let weights = Weights::load(Path::new(SECTION_MODEL))?;

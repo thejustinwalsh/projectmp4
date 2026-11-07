@@ -217,7 +217,9 @@ pub fn trim(src: &Source, start: f64, end: f64, fade: f64, tmp: &Path) -> Result
         )));
     }
     let frames = s1 - s0;
-    let fade_frames = (((fade * PIPELINE_RATE as f64).round() as u64).min(frames / 2)) as usize;
+    // (frames - 1) / 2, not frames / 2: at two frames a one-frame fade on each side
+    // would take both to zero.
+    let fade_frames = (((fade * PIPELINE_RATE as f64).round() as u64).min((frames - 1) / 2)) as usize;
     let fade_in = if s0 > 0 { fade_frames } else { 0 };
     let fade_out = if s1 < total { fade_frames } else { 0 };
 
@@ -257,7 +259,7 @@ fn copy_span(src: &Path, from: u64, frames: u64, fade_in: usize, fade_out: usize
 
     let mut head = Vec::with_capacity(44);
     head.extend_from_slice(b"RIFF");
-    head.extend_from_slice(&(36 + data_len).to_le_bytes());
+    head.extend_from_slice(&36u32.saturating_add(data_len).to_le_bytes());
     head.extend_from_slice(b"WAVEfmt ");
     head.extend_from_slice(&16u32.to_le_bytes());
     head.extend_from_slice(&3u16.to_le_bytes()); // IEEE float
@@ -281,7 +283,7 @@ fn copy_span(src: &Path, from: u64, frames: u64, fade_in: usize, fade_out: usize
         for (j, frame) in block.chunks_exact_mut(8).enumerate() {
             let at = done + j as u64;
             let mut gain = 1.0f64;
-            if (at as usize) < fade_in && at < frames {
+            if (at as usize) < fade_in {
                 gain *= ramp(at as usize, fade_in);
             }
             let from_end = frames - 1 - at;
