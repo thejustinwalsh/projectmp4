@@ -143,6 +143,8 @@ fn parse_report(stdout: &str) -> Result<Report> {
     }
     let c = get("alignment_correlation")?;
     let corr: f64 = c.parse().map_err(|_| bad("alignment_correlation", c))?;
+    // NaN guard: the negation rejects NaN; the suggested rewrite would admit it.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     if !(corr >= 0.9) {
         return Err(Error::msg(format!("stems worker: alignment_correlation={corr} is below 0.9")));
     }
@@ -196,7 +198,10 @@ fn read_wav(path: &Path, frames: usize) -> Result<Vec<f32>> {
         )
         ));
     }
-    Ok(b[44..].chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+    // The length check above makes the data an exact multiple of 4; `as_chunks` adds nothing.
+    #[allow(clippy::chunks_exact_to_as_chunks)]
+    let pcm = b[44..].chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    Ok(pcm)
 }
 
 const BLOCK: usize = 4096;
@@ -260,6 +265,8 @@ pub fn separate(rt: &Runtime, source: &Path, scratch: &Path) -> Result<Stems> {
                 *t += v;
             }
         }
+        // NaN guard: the negation rejects NaN; the suggested rewrite would admit it.
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
         if let Some(f) = wsum[..n].iter().position(|w| !(*w > 0.0)) {
             return Err(Error::msg(format!("stems: no span weight covers output frame {}", b0 + f)));
         }

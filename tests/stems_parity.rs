@@ -21,6 +21,8 @@ fn span_weight_is_unity_at_song_bounds() {
             wsum[s + f] += span_weight(f, len(s), s, source);
         }
     }
+    // NaN guard: the negation rejects NaN; the suggested rewrite would admit it.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     let bad = wsum.iter().position(|w| !(*w > 0.0));
     assert!(bad.is_none(), "zero weight sum at frame {bad:?}");
 }
@@ -32,7 +34,9 @@ fn read_stereo(path: &std::path::Path) -> Vec<f32> {
     let u32le = |o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
     assert_eq!((u16le(20), u16le(22), u32le(24), u16le(34)), (3, 2, 48000, 32), "{path:?} format");
     assert_eq!(u32le(40) as usize + 44, b.len());
-    b[44..].chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    #[allow(clippy::chunks_exact_to_as_chunks)] // length is checked above; no remainder to drop
+    let pcm = b[44..].chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    pcm
 }
 
 /// Fail unless the opt-out is set; a silent skip would read as a pass.
