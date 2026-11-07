@@ -11,7 +11,7 @@ mod agentdeck;
 mod cached_stems;
 
 use projectmp4::audio::sections::frontend::*;
-use projectmp4::audio::sections::spectrogram::{resample_48k_to_44k1, stack};
+use projectmp4::audio::sections::spectrogram::{frame_bands, frames_for, resample_48k_to_44k1, stack, HOP};
 use projectmp4::audio::sections::*;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -31,6 +31,8 @@ struct Pair {
     frames: usize,
     bundle: PathBuf,
     reference: Vec<Seg>,
+    /// Downbeat times (s) from agent-deck's cached beat grid for the same source; empty if absent.
+    downbeats: Vec<f32>,
 }
 
 fn pairs() -> Vec<Pair> {
@@ -74,7 +76,13 @@ fn pairs() -> Vec<Pair> {
                 conf: c["meanClassProbability"].as_f64().unwrap(),
             })
             .collect();
-        out.push(Pair { id: id.to_string(), frames: r["frames"].as_u64().unwrap() as usize, bundle: bundle.clone(), reference });
+        let downbeats = result["sourceSha256"]
+            .as_str()
+            .and_then(|h| std::fs::read(root.join(format!("beats/{h}.json"))).ok())
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .and_then(|v| v["grid"]["downbeats"].as_array().map(|a| a.iter().filter_map(|x| x.as_f64()).map(|x| x as f32).collect()))
+            .unwrap_or_default();
+        out.push(Pair { id: id.to_string(), frames: r["frames"].as_u64().unwrap() as usize, bundle: bundle.clone(), reference, downbeats });
     }
     out
 }
@@ -179,9 +187,77 @@ fn run(w: &Weights, fe: &dyn FourChannel, mix: &[f32]) -> projectmp4::ffi::Resul
     postprocess(&predict(w, &spec, frames)?, frames)
 }
 
+/// The 2048-sample window the spectrogram uses for frame `t`: centred, zero outside the signal.
+fn window_at(pcm: &[f32], t: usize) -> [f32; 2048] {
+    let mut w = [0f32; 2048];
+    let start = (t * HOP) as i64 - 1024;
+    for (j, v) in w.iter_mut().enumerate() {
+        let i = start + j as i64;
+        if i >= 0 && (i as usize) < pcm.len() {
+            *v = pcm[i as usize];
+        }
+    }
+    w
+}
+
+/// Per-frame band energies (81 bands) for a 48 kHz mono signal.
+fn band_frames(mono_48k: &[f32]) -> projectmp4::ffi::Result<Vec<[f32; 81]>> {
+    let pcm = resample_48k_to_44k1(mono_48k)?;
+    (0..frames_for(pcm.len()))
+        .map(|t| {
+            let mut b = [0f32; 81];
+            frame_bands(&window_at(&pcm, t), &mut b)?;
+            Ok(b)
+        })
+        .collect()
+}
+
+/// Window of `span` frames with the most energy in bands `0..cut`, earliest on ties, then
+/// snapped to the nearest downbeat if the snapped span still fits.
+fn pick_peak(bands: &[[f32; 81]], cut: usize, span: usize, downbeats_s: &[f32]) -> (usize, usize) {
+    let frames = bands.len();
+    let mut prefix = vec![0f64; frames + 1];
+    for (t, b) in bands.iter().enumerate() {
+        prefix[t + 1] = prefix[t] + b[..cut].iter().sum::<f32>() as f64;
+    }
+    let (mut start, mut best) = (0usize, f64::NEG_INFINITY);
+    for s in 0..=frames.saturating_sub(span) {
+        let e = prefix[(s + span).min(frames)] - prefix[s];
+        if e > best {
+            best = e;
+            start = s;
+        }
+    }
+    let snapped = downbeats_s
+        .iter()
+        .map(|s| (s * 100.0).round() as i64)
+        .min_by_key(|f| (f - start as i64).abs())
+        .filter(|f| *f >= 0 && *f as usize + span <= frames);
+    if let Some(f) = snapped {
+        start = f as usize;
+    }
+    (start, start + span)
+}
+
+/// Task 20b picker: low-band (bands 0..24 of 81) energy peak, no model.
+fn energy_peak_clip(mono_48k: &[f32], span_frames: usize, downbeats_s: &[f32]) -> (usize, usize) {
+    pick_peak(&band_frames(mono_48k).unwrap(), 24, span_frames, downbeats_s)
+}
+
+const CUTS: [usize; 3] = [16, 24, 32];
+
+/// Scores a picked span with the harness's own `clip` predicate by presenting it as the
+/// estimate's one chorus.
+fn score_pick(span: (usize, usize), reference: &[Seg]) -> Clip {
+    let est = [Seg { start: span.0 as f64 / 100.0, end: span.1 as f64 / 100.0, label: "chorus".into(), conf: 1.0 }];
+    clip(&est, reference)
+}
+
 const NAMES: [&str; 3] = ["CachedStems (htdemucs)", "HpssBands", "MixFourWays"];
 
-type Row = (String, usize, [Result<Score, String>; 3]);
+/// (clip outcome, picked start frame, reference start frame, span) per band cut.
+type Pick = (Clip, usize, usize, usize);
+type Row = (String, usize, [Result<Score, String>; 3], [Option<Pick>; 3]);
 
 fn main() {
     let out_path = std::env::args()
@@ -204,6 +280,7 @@ fn main() {
                 let st = cached.channels(&vec![0.0; len], 48_000).unwrap();
                 let mix: Vec<f32> = (0..len).map(|i| st[0][i] + st[1][i] + st[2][i] + st[3][i]).collect();
                 drop(st);
+                let mut band_frames_cache: Option<Vec<[f32; 81]>> = None;
                 let fes: [&dyn FourChannel; 3] = [&cached, &HpssBands, &MixFourWays];
                 let ref_b = boundaries(&p.reference);
                 let res: [Result<Score, String>; 3] = std::array::from_fn(|i| {
@@ -218,8 +295,18 @@ fn main() {
                         sections: segs.len(),
                     })
                 });
+                let picks: [Option<Pick>; 3] = std::array::from_fn(|i| {
+                    let r = best_chorus(&p.reference)?;
+                    let span = ((r.end - r.start) * 100.0).round() as usize;
+                    let bands = band_frames_cache.get_or_insert_with(|| band_frames(&mix).unwrap());
+                    let sp = pick_peak(bands, CUTS[i], span, &p.downbeats);
+                    if CUTS[i] == 24 {
+                        assert_eq!(sp, energy_peak_clip(&mix, span, &p.downbeats), "cached-band path must equal the spec'd picker");
+                    }
+                    Some((score_pick(sp, &p.reference), sp.0, (r.start * 100.0).round() as usize, span))
+                });
                 eprintln!("{} ({} frames) done in {:.0}s", &p.id[..8], p.frames, t0.elapsed().as_secs_f64());
-                results.lock().unwrap().push((p.id.clone(), p.frames, res));
+                results.lock().unwrap().push((p.id.clone(), p.frames, res, picks));
             });
         }
     });
@@ -259,6 +346,17 @@ fn main() {
             results.len() - ok.len()
         );
     }
+    {
+        let line = |k: usize| {
+            let app: Vec<&Pick> = results.iter().filter_map(|r| r.3[k].as_ref()).collect();
+            let c = app.iter().filter(|p| p.0.chosen).count();
+            let l = app.iter().filter(|p| p.0.longer).count();
+            let d = app.len().max(1) as f64;
+            (c, l, app.len(), c as f64 / d, l as f64 / d)
+        };
+        let (c, l, n, cf, lf) = line(1);
+        md += &format!("| EnergyPeak (low bands 0..24, no model) | n/a | n/a | n/a | {cf:.3} ({c}/{n}) | {lf:.3} ({l}/{n}) | 0 |\n");
+    }
     md += "\nChosen-clip agreement is over tracks whose reference has at least one `chorus`; a front end that finds no chorus there scores a miss. Tracks without a reference chorus are outside the metric.\n";
     md += &format!(
         "Reference tracks with no chorus: {}.\n",
@@ -272,8 +370,15 @@ fn main() {
             md += &format!("- {f}\n");
         }
     }
-    md += "\n## Per track (F@0.5 / F@3 / label acc / chosen-clip, sections)\n\n| track | frames | CachedStems | HpssBands | MixFourWays |\n|---|---|---|---|---|\n";
-    for (id, frames, r) in &results {
+    md += "\n## EnergyPeak band-cut sensitivity (same tracks, same spans, downbeat-snapped)\n\n| low-band cut | chosen-clip agreement | longer-span agreement |\n|---|---|---|\n";
+    for k in 0..3 {
+        let app: Vec<&Pick> = results.iter().filter_map(|r| r.3[k].as_ref()).collect();
+        let c = app.iter().filter(|p| p.0.chosen).count();
+        let l = app.iter().filter(|p| p.0.longer).count();
+        md += &format!("| {} of 81 | {:.3} ({}/{}) | {:.3} ({}/{}) |\n", CUTS[k], c as f64 / app.len() as f64, c, app.len(), l as f64 / app.len() as f64, l, app.len());
+    }
+    md += "\n## Per track (F@0.5 / F@3 / label acc / chosen-clip, sections)\n\n| track | frames | CachedStems | HpssBands | MixFourWays | EnergyPeak 16 / 24 / 32 (picked start vs ref start, s) |\n|---|---|---|---|---|---|\n";
+    for (id, frames, r, picks) in &results {
         let cell = |x: &Result<Score, String>| match x {
             Ok(s) => format!(
                 "{:.2} / {:.2} / {:.2} / {}, {}",
@@ -285,7 +390,14 @@ fn main() {
             ),
             Err(e) => format!("FAILED: {e}"),
         };
-        md += &format!("| {} | {} | {} | {} | {} |\n", &id[..8], frames, cell(&r[0]), cell(&r[1]), cell(&r[2]));
+        let pc: Vec<String> = picks
+            .iter()
+            .map(|p| match p {
+                None => "n/a".to_string(),
+                Some((c, s, rs, _)) => format!("{} ({:.1} vs {:.1})", if c.chosen { "hit" } else { "miss" }, *s as f64 / 100.0, *rs as f64 / 100.0),
+            })
+            .collect();
+        md += &format!("| {} | {} | {} | {} | {} | {} |\n", &id[..8], frames, cell(&r[0]), cell(&r[1]), cell(&r[2]), pc.join(" / "));
     }
     print!("{md}");
     std::fs::write(&out_path, &md).unwrap();
