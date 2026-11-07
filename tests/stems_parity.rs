@@ -1,5 +1,7 @@
 #[path = "common/agentdeck.rs"]
 mod agentdeck;
+#[path = "common/tmp.rs"]
+mod tmp;
 use projectmp4::audio::stems::*;
 
 #[test]
@@ -59,9 +61,8 @@ fn stems_match_the_cached_bundle_bit_exactly() {
         Ok(rt) => rt,
         Err(e) => return skip_or_fail(format!("stems runtime package unavailable: {e}")),
     };
-    let scratch = std::env::temp_dir().join(format!("projectmp4-stems-parity-{}", std::process::id()));
+    let scratch = tmp::Tmp::new("stems-parity");
     let stems = separate(&rt, &source, &scratch).unwrap();
-    let _ = std::fs::remove_dir_all(&scratch);
     assert_eq!(stems.frames, 576_000);
 
     for (role, mine) in [("bass", &stems.bass), ("drums", &stems.drums), ("other", &stems.other), ("vocals", &stems.vocals)] {
