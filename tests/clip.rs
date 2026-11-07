@@ -355,14 +355,39 @@ fn trim_of_a_handful_of_frames_is_never_silent() {
 
 #[test]
 fn an_impossible_target_is_refused_before_any_stem_work() {
+    // 141 s: long enough that `want` (200) clamps to 141, which X still refuses.
     let dir = Tmp::new("clip-target");
-    let src = flat_wav(&dir, PIPELINE_RATE as usize);
+    let src = flat_wav(&dir, 141 * PIPELINE_RATE as usize);
     let mut args = projectmp4::render::plan::RenderArgs::new("flat.wav");
     args.clip = ClipKind::Drop;
     args.target = Target::X;
     args.clip_seconds = Some(200.0);
     let e = projectmp4::render::plan::render_plan_from_source(&args, src).unwrap_err().to_string();
-    assert!(e.contains("--target x allows 140 s") && e.contains("200.0 s"), "{e}");
+    assert!(e.contains("--target x allows 140 s") && e.contains("141.0 s"), "{e}");
+}
+
+#[test]
+fn asking_for_more_than_the_track_holds_is_a_legal_request() {
+    use projectmp4::render::plan::check_clip_target;
+    // Regression: both of these were refused when the check used `want` unclamped.
+    check_clip_target(Target::X, 180.0, 90.0).expect("90 s track, x: clamps to the whole track");
+    check_clip_target(Target::Discord, 1000.0, 60.0).expect("60 s track, discord: clamps to the whole track");
+    // ...and a request the target cannot accept is still refused.
+    assert!(check_clip_target(Target::X, 180.0, 300.0).is_err());
+}
+
+#[test]
+fn a_bad_fps_and_flash_rate_are_refused_on_the_source_path_too() {
+    let dir = Tmp::new("clip-args");
+    let src = flat_wav(&dir, PIPELINE_RATE as usize);
+    let mut args = projectmp4::render::plan::RenderArgs::new("flat.wav");
+    args.fps = 5;
+    let e = projectmp4::render::plan::render_plan_from_source(&args, src.clone()).unwrap_err().to_string();
+    assert!(e.contains("--fps 5"), "{e}");
+    let mut args = projectmp4::render::plan::RenderArgs::new("flat.wav");
+    args.flash_rate = 2.0;
+    let e = projectmp4::render::plan::render_plan_from_source(&args, src).unwrap_err().to_string();
+    assert!(e.contains("--flash-rate"), "{e}");
 }
 
 #[test]

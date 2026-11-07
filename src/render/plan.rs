@@ -313,10 +313,7 @@ pub fn render_plan(args: &RenderArgs) -> Result<RenderPlan> {
 }
 
 pub(crate) fn prepare(args: &RenderArgs) -> Result<Prepared> {
-    if !(MIN_FPS..=MAX_FPS).contains(&args.fps) {
-        return Err(Error::msg(format!("--fps {} is out of range {MIN_FPS}..={MAX_FPS}", args.fps)));
-    }
-    check_flash_rate(args.flash_rate)?;
+    check_args(args)?;
     let tmp = TempDir::new()?;
     let src = normalise(&args.input, &tmp.0)?;
     prepare_with(args, tmp, src)
@@ -330,18 +327,7 @@ pub fn render_plan_from_source(args: &RenderArgs, src: crate::audio::Source) -> 
 }
 
 fn prepare_with(args: &RenderArgs, tmp: TempDir, mut src: crate::audio::Source) -> Result<Prepared> {
-    if let Some(l) = args.limit_seconds {
-        check_limit(l)?;
-    }
-    if let Some(c) = args.clip_seconds {
-        check_clip_seconds(c)?;
-        if args.clip == ClipKind::Full {
-            return Err(Error::msg(format!(
-                "--clip-seconds {c} has no effect with --clip full, which renders the whole track; \
-                 pass --clip drop or --clip intro, or use --limit-seconds {c} to render the first {c} s"
-            )));
-        }
-    }
+    check_args(args)?;
     let frames = require_samples(wav_frames(&src.wav)?, &args.input)?;
     let mut wav_secs = frames as f64 / PIPELINE_RATE as f64;
     // A clip is cut from the WAV before anything else looks at it, so beat
@@ -351,10 +337,8 @@ fn prepare_with(args: &RenderArgs, tmp: TempDir, mut src: crate::audio::Source) 
     let mut clip_made = None;
     if args.clip != ClipKind::Full {
         let want = args.clip_seconds.or((args.target == Target::X).then_some(X_TARGET_WANT));
-        // `want` is an upper bound on the span `choose` can return, so a target that
-        // cannot fit `want` cannot fit the clip either: refuse before the stems.
         if let Some(w) = want {
-            video_bitrate_kbps(args.target, w, AUDIO_KBPS)?;
+            check_clip_target(args.target, w, wav_secs)?;
         }
         let downbeats = match analyse_outcome(&src, &args.models, Some(wav_secs))? {
             Outcome::Beats(a) => a.downbeats,
@@ -499,6 +483,40 @@ pub fn check_limit(l: f64) -> Result<()> {
     } else {
         Err(Error::msg(format!("--limit-seconds must be a positive number of seconds, got {l}")))
     }
+}
+
+/// Every check that needs only the arguments, so it can run before the decode.
+/// Both entry points call it: `prepare` to refuse before ffmpeg starts,
+/// `prepare_with` because a caller may hand it a source directly.
+fn check_args(args: &RenderArgs) -> Result<()> {
+    if !(MIN_FPS..=MAX_FPS).contains(&args.fps) {
+        return Err(Error::msg(format!("--fps {} is out of range {MIN_FPS}..={MAX_FPS}", args.fps)));
+    }
+    check_flash_rate(args.flash_rate)?;
+    if let Some(l) = args.limit_seconds {
+        check_limit(l)?;
+    }
+    if let Some(c) = args.clip_seconds {
+        check_clip_seconds(c)?;
+        if args.clip == ClipKind::Full {
+            return Err(Error::msg(format!(
+                "--clip-seconds {c} has no effect with --clip full, which renders the whole track; \
+                 pass --clip drop or --clip intro, or use --limit-seconds {c} to render the first {c} s"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Validate the clip length *requested* against the target, before any stem work.
+///
+/// This checks the request, not the outcome. Asking for more seconds than the
+/// track holds is legal and clamps to the track, hence the `min`; asking for
+/// more seconds than the target accepts is not, and is better said now than
+/// after minutes of stem separation. A clip shorter than `want.min(track_secs)`
+/// can still pass a target this refuses: it is not a prediction of the result.
+pub fn check_clip_target(target: Target, want: f64, track_secs: f64) -> Result<()> {
+    video_bitrate_kbps(target, want.min(track_secs), AUDIO_KBPS).map(|_| ())
 }
 
 /// A clip length must be a positive, finite number of seconds.

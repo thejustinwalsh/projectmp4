@@ -253,13 +253,15 @@ fn copy_span(src: &Path, from: u64, frames: u64, fade_in: usize, fade_out: usize
     let werr = |e: std::io::Error| Error::msg(format!("write {}: {e}", out.display()));
     let data_len = u32::try_from(frames * 8)
         .map_err(|_| Error::msg(format!("a {frames}-frame clip does not fit a WAV data chunk")))?;
+    let riff_len = u32::try_from(frames * 8 + 36)
+        .map_err(|_| Error::msg(format!("a {frames}-frame clip does not fit a WAV file (4 GiB limit)")))?;
     let mut input = std::fs::File::open(src).map_err(rerr)?;
     input.seek(SeekFrom::Start(from)).map_err(rerr)?;
     let mut w = BufWriter::new(std::fs::File::create(out).map_err(werr)?);
 
     let mut head = Vec::with_capacity(44);
     head.extend_from_slice(b"RIFF");
-    head.extend_from_slice(&36u32.saturating_add(data_len).to_le_bytes());
+    head.extend_from_slice(&riff_len.to_le_bytes());
     head.extend_from_slice(b"WAVEfmt ");
     head.extend_from_slice(&16u32.to_le_bytes());
     head.extend_from_slice(&3u16.to_le_bytes()); // IEEE float
