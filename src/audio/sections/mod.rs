@@ -1,5 +1,6 @@
 //! Musical-section labelling from a single audio file.
 
+pub mod frontend;
 pub mod gguf;
 pub mod model;
 pub mod postprocess;
