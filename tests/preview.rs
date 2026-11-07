@@ -40,6 +40,10 @@ fn plan_of(pool_len: usize, switches: &[(f64, Cut)], fps: u32) -> RenderPlan {
         preset_sequence,
         pool,
         textures: None,
+        clip: projectmp4::audio::sections::clip::ClipKind::Full,
+        clip_span: None,
+        clip_reason: None,
+        clip_label: None,
     }
 }
 
