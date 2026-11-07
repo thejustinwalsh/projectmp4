@@ -124,13 +124,15 @@ fn probe(input: &Path) -> Result<(f64, Option<String>, Option<String>)> {
     Ok((duration, tag("title"), tag("artist")))
 }
 
-/// Stereo frames in a normalised WAV, from its `data` chunk size.
+/// Where a normalised WAV's samples are: the `data` chunk's byte offset and its
+/// frame count.
 ///
 /// The `fmt ` chunk is read and must say 48 kHz, stereo, 32-bit float: the
 /// frame size (8 bytes) and the rate both enter every time computed from this
 /// count, so a file that is anything else is an error here rather than a
-/// quietly wrong duration there.
-pub fn wav_frames(path: &Path) -> Result<u64> {
+/// quietly wrong duration there. Chunks other than `fmt ` and `data` (ffmpeg
+/// writes a `LIST`) are skipped, so the offset is not 44 in general.
+fn wav_data(path: &Path) -> Result<(u64, u64)> {
     use std::io::{Seek, SeekFrom};
     let err = |e: std::io::Error| Error::msg(format!("read {}: {e}", path.display()));
     let bad = |what: String| Error::msg(format!("{} is not a normalised WAV: {what}", path.display()));
@@ -173,8 +175,128 @@ pub fn wav_frames(path: &Path) -> Result<u64> {
             let len = f.metadata().map_err(err)?.len();
             let pos = f.stream_position().map_err(err)?;
             let bytes = if size == 0xFFFF_FFFF || pos + size > len { len - pos } else { size };
-            return Ok(bytes / 8);
+            return Ok((pos, bytes / 8));
         }
         f.seek(SeekFrom::Current(((size + 1) & !1) as i64)).map_err(err)?;
     }
+}
+
+/// Stereo frames in a normalised WAV, from its `data` chunk size. See [`wav_data`]
+/// for what the file must be.
+pub fn wav_frames(path: &Path) -> Result<u64> {
+    wav_data(path).map(|(_, frames)| frames)
+}
+
+/// Frames copied per read while cutting a clip: bounds memory at 32 KiB however
+/// long the source is.
+const TRIM_BLOCK_FRAMES: usize = 4096;
+
+/// Cut `src` to `start..end` seconds and write the result as a new pipeline
+/// WAV in `tmp`. `fade` seconds of raised-cosine fade are applied at each edge
+/// that is a real cut: the fade-in only when `start` is past the first sample,
+/// the fade-out only when `end` is before the last. Tags and the original
+/// file's sha256 carry over; `duration` becomes the clip's length.
+pub fn trim(src: &Source, start: f64, end: f64, fade: f64, tmp: &Path) -> Result<Source> {
+    if !start.is_finite() || !end.is_finite() || !fade.is_finite() {
+        return Err(Error::msg(format!("cannot trim to {start}..{end} s with a {fade} s fade: all three must be finite")));
+    }
+    if fade < 0.0 {
+        return Err(Error::msg(format!("cannot trim with a {fade} s fade: a fade cannot be negative")));
+    }
+    if start < 0.0 || end <= start {
+        return Err(Error::msg(format!("cannot trim to {start}..{end} s: need 0 <= start < end")));
+    }
+    let (data_at, total) = wav_data(&src.wav)?;
+    let s0 = ((start * PIPELINE_RATE as f64).round() as u64).min(total);
+    let s1 = ((end * PIPELINE_RATE as f64).round() as u64).min(total);
+    if s1 <= s0 {
+        return Err(Error::msg(format!(
+            "cannot trim to {start}..{end} s: {} has {total} frames ({:.3} s), so the span is empty",
+            src.wav.display(),
+            total as f64 / PIPELINE_RATE as f64
+        )));
+    }
+    let frames = s1 - s0;
+    let fade_frames = (((fade * PIPELINE_RATE as f64).round() as u64).min(frames / 2)) as usize;
+    let fade_in = if s0 > 0 { fade_frames } else { 0 };
+    let fade_out = if s1 < total { fade_frames } else { 0 };
+
+    let wav = tmp.join(format!("{}-clip-{s0}-{s1}.wav", src.sha256));
+    let part = tmp.join(format!("{}-clip-{s0}-{s1}.wav.part", src.sha256));
+    let result = copy_span(&src.wav, data_at + s0 * 8, frames, fade_in, fade_out, &part)
+        .and_then(|()| {
+            std::fs::rename(&part, &wav).map_err(|e| {
+                Error::msg(format!("cannot move {} to {}: {e}", part.display(), wav.display()))
+            })
+        });
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&part);
+        return Err(e);
+    }
+    Ok(Source {
+        wav,
+        sha256: src.sha256.clone(),
+        duration: frames as f64 / PIPELINE_RATE as f64,
+        title: src.title.clone(),
+        artist: src.artist.clone(),
+    })
+}
+
+/// Write `frames` frames from byte `from` of `src` to `out` as a canonical WAV,
+/// shaping the first `fade_in` and last `fade_out` frames.
+#[allow(clippy::chunks_exact_to_as_chunks)] // blocks are a whole number of 8-byte frames by construction
+fn copy_span(src: &Path, from: u64, frames: u64, fade_in: usize, fade_out: usize, out: &Path) -> Result<()> {
+    use std::io::{BufWriter, Seek, SeekFrom, Write};
+    let rerr = |e: std::io::Error| Error::msg(format!("read {}: {e}", src.display()));
+    let werr = |e: std::io::Error| Error::msg(format!("write {}: {e}", out.display()));
+    let data_len = u32::try_from(frames * 8)
+        .map_err(|_| Error::msg(format!("a {frames}-frame clip does not fit a WAV data chunk")))?;
+    let mut input = std::fs::File::open(src).map_err(rerr)?;
+    input.seek(SeekFrom::Start(from)).map_err(rerr)?;
+    let mut w = BufWriter::new(std::fs::File::create(out).map_err(werr)?);
+
+    let mut head = Vec::with_capacity(44);
+    head.extend_from_slice(b"RIFF");
+    head.extend_from_slice(&(36 + data_len).to_le_bytes());
+    head.extend_from_slice(b"WAVEfmt ");
+    head.extend_from_slice(&16u32.to_le_bytes());
+    head.extend_from_slice(&3u16.to_le_bytes()); // IEEE float
+    head.extend_from_slice(&2u16.to_le_bytes());
+    head.extend_from_slice(&PIPELINE_RATE.to_le_bytes());
+    head.extend_from_slice(&(PIPELINE_RATE * 8).to_le_bytes());
+    head.extend_from_slice(&8u16.to_le_bytes());
+    head.extend_from_slice(&32u16.to_le_bytes());
+    head.extend_from_slice(b"data");
+    head.extend_from_slice(&data_len.to_le_bytes());
+    w.write_all(&head).map_err(werr)?;
+
+    // Same raised cosine as the stem overlap-add window in `stems::span_weight`.
+    let ramp = |i: usize, f: usize| 0.5 - 0.5 * (std::f64::consts::PI * i as f64 / f as f64).cos();
+    let mut buf = vec![0u8; TRIM_BLOCK_FRAMES * 8];
+    let mut done = 0u64;
+    while done < frames {
+        let n = (frames - done).min(TRIM_BLOCK_FRAMES as u64) as usize;
+        let block = &mut buf[..n * 8];
+        input.read_exact(block).map_err(rerr)?;
+        for (j, frame) in block.chunks_exact_mut(8).enumerate() {
+            let at = done + j as u64;
+            let mut gain = 1.0f64;
+            if (at as usize) < fade_in && at < frames {
+                gain *= ramp(at as usize, fade_in);
+            }
+            let from_end = frames - 1 - at;
+            if (from_end as usize) < fade_out {
+                gain *= ramp(from_end as usize, fade_out);
+            }
+            if gain != 1.0 {
+                for ch in frame.chunks_exact_mut(4) {
+                    let v = f32::from_le_bytes([ch[0], ch[1], ch[2], ch[3]]);
+                    ch.copy_from_slice(&((v as f64 * gain) as f32).to_le_bytes());
+                }
+            }
+        }
+        w.write_all(block).map_err(werr)?;
+        done += n as u64;
+    }
+    w.flush().map_err(werr)
 }

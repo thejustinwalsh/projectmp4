@@ -4,7 +4,9 @@
 //! preview without rendering anything.
 
 use crate::audio::analysis::DEFAULT_MODELS;
-use crate::audio::normalise::{wav_frames, PIPELINE_RATE};
+use crate::audio::normalise::{trim, wav_frames, PIPELINE_RATE};
+use crate::audio::sections::clip::{self, ClipKind};
+use crate::audio::sections::LABELS;
 use crate::audio::timeline::{plan_switches_reporting, Cut, SwitchPoint};
 use crate::audio::{analyse_outcome, normalise, Analysis, Driver, Outcome};
 use crate::encode::{video_bitrate_kbps, Target, AUDIO_KBPS};
@@ -25,6 +27,11 @@ pub const DROP_GAP: f64 = 4.0;
 /// one-second dead-preset rule degenerate to a frame or two.
 pub const MIN_FPS: u32 = 10;
 pub const MAX_FPS: u32 = 240;
+/// Clip length `--target x` asks for when `--clip-seconds` is not given: under
+/// the 140 s X limit with margin.
+pub const X_TARGET_WANT: f64 = 135.0;
+/// Fade applied at each cut edge of a clip.
+pub const CLIP_FADE: f64 = 1.5;
 
 const PROFILES_TOML: &str = include_str!("../../presets/profiles.toml");
 
@@ -56,6 +63,11 @@ pub struct RenderArgs {
     pub progress: bool,
     /// Render only the first N seconds (a trial run). `total_frames` reflects it.
     pub limit_seconds: Option<f64>,
+    /// Which part of the track to render. Anything but `Full` separates stems
+    /// and runs the section model first.
+    pub clip: ClipKind,
+    /// Clip length in seconds; `None` is the chosen section's own length (135 s under `--target x`).
+    pub clip_seconds: Option<f64>,
 }
 
 impl RenderArgs {
@@ -78,6 +90,8 @@ impl RenderArgs {
             models: PathBuf::from(DEFAULT_MODELS),
             progress: false,
             limit_seconds: None,
+            clip: ClipKind::Full,
+            clip_seconds: None,
         }
     }
 
@@ -100,6 +114,13 @@ pub struct RenderPlan {
     pub duration: f64,
     /// The trial-render limit this plan was made with, if any.
     pub limit_seconds: Option<f64>,
+    /// Which part of the source was rendered.
+    pub clip: ClipKind,
+    /// The span cut from the source, in the *source's* timeline. `None` for `full`.
+    pub clip_span: Option<(f64, f64)>,
+    /// `Reason::name()` of the pick, and `LABELS` entry of the section it came from.
+    pub clip_reason: Option<String>,
+    pub clip_label: Option<String>,
     /// `ceil(duration * fps)`.
     pub total_frames: u64,
     pub bpm: f32,
@@ -135,6 +156,10 @@ impl RenderPlan {
             "fps": self.fps,
             "duration": self.duration,
             "limit_seconds": self.limit_seconds,
+            "clip": self.clip.name(),
+            "clip_span": self.clip_span.map(|(a, b)| [a, b]),
+            "clip_reason": self.clip_reason,
+            "clip_label": self.clip_label,
             "total_frames": self.total_frames,
             "bpm": self.bpm,
             "watermark_style": match self.watermark_style { MarkStyle::Word => "word", MarkStyle::Sigil => "sigil" },
@@ -200,6 +225,19 @@ impl RenderPlan {
                 None | Some(Value::Null) => None,
                 Some(x) => Some(x.as_f64().ok_or_else(|| bad("limit_seconds"))?),
             },
+            clip: match str_of("clip") {
+                None => ClipKind::Full,
+                Some(c) => ClipKind::parse(&c).map_err(|_| bad("clip"))?,
+            },
+            clip_span: match v.get("clip_span") {
+                None | Some(Value::Null) => None,
+                Some(x) => match x.as_array().map(Vec::as_slice) {
+                    Some([a, b]) => Some((a.as_f64().ok_or_else(|| bad("clip_span"))?, b.as_f64().ok_or_else(|| bad("clip_span"))?)),
+                    _ => return Err(bad("clip_span")),
+                },
+            },
+            clip_reason: opt_str("clip_reason")?,
+            clip_label: opt_str("clip_label")?,
             duration: v.get("duration").and_then(Value::as_f64).ok_or_else(|| bad("duration"))?,
             total_frames: v.get("total_frames").and_then(Value::as_u64).ok_or_else(|| bad("total_frames"))?,
             bpm: v.get("bpm").and_then(Value::as_f64).ok_or_else(|| bad("bpm"))? as f32,
@@ -281,6 +319,9 @@ pub(crate) fn prepare(args: &RenderArgs) -> Result<Prepared> {
     if let Some(l) = args.limit_seconds {
         check_limit(l)?;
     }
+    if let Some(c) = args.clip_seconds {
+        check_clip_seconds(c)?;
+    }
     check_flash_rate(args.flash_rate)?;
     let tmp = TempDir::new()?;
     let src = normalise(&args.input, &tmp.0)?;
@@ -294,9 +335,29 @@ pub fn render_plan_from_source(args: &RenderArgs, src: crate::audio::Source) -> 
     prepare_with(args, TempDir::new()?, src).map(|p| p.plan)
 }
 
-fn prepare_with(args: &RenderArgs, tmp: TempDir, src: crate::audio::Source) -> Result<Prepared> {
+fn prepare_with(args: &RenderArgs, tmp: TempDir, mut src: crate::audio::Source) -> Result<Prepared> {
+    if let Some(c) = args.clip_seconds {
+        check_clip_seconds(c)?;
+    }
     let frames = require_samples(wav_frames(&src.wav)?, &args.input)?;
-    let wav_secs = frames as f64 / PIPELINE_RATE as f64;
+    let mut wav_secs = frames as f64 / PIPELINE_RATE as f64;
+    // A clip is cut from the WAV before anything else looks at it, so beat
+    // analysis, the driver, the switches, the loop and the encoder all see the
+    // clip as if it were the whole track. The full track is analysed once here,
+    // only for its downbeats: the grid the cut snaps to.
+    let mut clip_made = None;
+    if args.clip != ClipKind::Full {
+        let want = args.clip_seconds.or((args.target == Target::X).then_some(X_TARGET_WANT));
+        let downbeats = match analyse_outcome(&src, &args.models, Some(wav_secs))? {
+            Outcome::Beats(a) => a.downbeats,
+            Outcome::NoBeats(_) => Vec::new(),
+        };
+        let chosen = clip::locate(&src.wav, args.clip, want, &downbeats, wav_secs, &tmp.0, args.progress)?;
+        src = trim(&src, chosen.start, chosen.end, CLIP_FADE, &tmp.0)?;
+        let frames = require_samples(wav_frames(&src.wav)?, &args.input)?;
+        wav_secs = frames as f64 / PIPELINE_RATE as f64;
+        clip_made = Some(chosen);
+    }
     // Fail before the minutes of analysis and the hours of rendering: an
     // impossible size target is known from the length alone.
     let shown = args.limit_seconds.map_or(wav_secs, |l| l.min(wav_secs));
@@ -346,6 +407,10 @@ fn prepare_with(args: &RenderArgs, tmp: TempDir, src: crate::audio::Source) -> R
         fps: args.fps,
         duration: shown,
         limit_seconds: args.limit_seconds,
+        clip: args.clip,
+        clip_span: clip_made.as_ref().map(|c| (c.start, c.end)),
+        clip_reason: clip_made.as_ref().map(|c| c.reason.name().to_string()),
+        clip_label: clip_made.as_ref().and_then(|c| c.label).map(|l| LABELS[l as usize].to_string()),
         total_frames,
         bpm: analysis.bpm,
         watermark_style: args.watermark_style,
@@ -422,6 +487,15 @@ pub fn check_limit(l: f64) -> Result<()> {
         Ok(())
     } else {
         Err(Error::msg(format!("--limit-seconds must be a positive number of seconds, got {l}")))
+    }
+}
+
+/// A clip length must be a positive, finite number of seconds.
+pub fn check_clip_seconds(v: f64) -> Result<()> {
+    if v.is_finite() && v > 0.0 {
+        Ok(())
+    } else {
+        Err(Error::msg(format!("--clip-seconds must be a positive number of seconds, got {v}")))
     }
 }
 

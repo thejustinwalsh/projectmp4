@@ -1,5 +1,6 @@
 //! Command line: `init`, `rank`, `preview`, `render`.
 
+use crate::audio::sections::ClipKind;
 use crate::encode::Target;
 use crate::ffi::{Error, Result};
 use crate::presets::{default_cache_dir, Manifest, Packs};
@@ -56,6 +57,15 @@ struct PlanCmd {
     /// Use only the first N seconds.
     #[arg(long, value_parser = parse_limit)]
     limit_seconds: Option<f64>,
+    /// Render only part of the track: the whole thing, the drop (the best chorus),
+    /// or the intro. Anything but `full` separates stems and labels sections
+    /// first, which takes a few times the track's length.
+    #[arg(long, default_value = "full", value_parser = parse_clip)]
+    clip: ClipKind,
+    /// How long the clip should be. Defaults to the chosen section's own length,
+    /// or 135 s under `--target x`.
+    #[arg(long, value_parser = parse_clip_seconds)]
+    clip_seconds: Option<f64>,
     /// Defaults to the file's title tag, then its file name.
     #[arg(long)]
     title: Option<String>,
@@ -89,6 +99,8 @@ impl PlanCmd {
         a.presets = self.preset;
         a.fps = self.fps;
         a.limit_seconds = self.limit_seconds;
+        a.clip = self.clip;
+        a.clip_seconds = self.clip_seconds;
         a.title = self.title;
         a.artist = self.artist;
         a.art = self.art;
@@ -109,6 +121,7 @@ struct RenderCmd {
     fast: bool,
     /// Fit the output to where it is going: none, discord (500 MB), x (512 MB, 140 s)
     /// or youtube. Capped targets use a single-pass bitrate sized from the track length.
+    /// An over-long track for x needs `--clip drop` (or `--limit-seconds 140`).
     #[arg(long, default_value = "none", value_parser = parse_target)]
     target: Target,
     /// Output path. Default: <input name>.mp4 in the current directory.
@@ -122,6 +135,16 @@ struct RenderCmd {
 fn parse_limit(s: &str) -> std::result::Result<f64, String> {
     let v: f64 = s.parse().map_err(|_| format!("{s:?} is not a number"))?;
     crate::render::plan::check_limit(v).map_err(|e| e.0.into_owned())?;
+    Ok(v)
+}
+
+fn parse_clip(s: &str) -> std::result::Result<ClipKind, String> {
+    ClipKind::parse(s).map_err(|e| e.0.into_owned())
+}
+
+fn parse_clip_seconds(s: &str) -> std::result::Result<f64, String> {
+    let v: f64 = s.parse().map_err(|_| format!("{s:?} is not a number"))?;
+    crate::render::plan::check_clip_seconds(v).map_err(|e| e.0.into_owned())?;
     Ok(v)
 }
 

@@ -60,7 +60,7 @@ pub const CRF_KBPS: f64 = 16030.0;
 /// cost plus 25% headroom for content costlier than the one measured.
 const CAP_CRF_AT: f64 = 20000.0;
 /// X's free-account duration limit.
-const X_MAX_SECONDS: f64 = 140.0;
+pub const X_MAX_SECONDS: f64 = 140.0;
 /// The mp4 audio bitrate `ffmpeg_args` asks for.
 pub const AUDIO_KBPS: u32 = 256;
 
@@ -77,7 +77,8 @@ pub fn video_bitrate_kbps(target: Target, duration_s: f64, audio_kbps: u32) -> R
             if duration_s > X_MAX_SECONDS {
                 return Err(Error::msg(format!(
                     "--target x allows {X_MAX_SECONDS:.0} s and this render is {duration_s:.1} s; \
-                     no bitrate fixes a duration limit. Shorten it with --limit-seconds {X_MAX_SECONDS:.0}"
+                     no bitrate fixes a duration limit. Cut to the best part with --clip drop, \
+                     or shorten it with --limit-seconds {X_MAX_SECONDS:.0}"
                 )));
             }
             512e6

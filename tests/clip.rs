@@ -88,7 +88,7 @@ fn x_rejects_nothing_we_would_now_produce() {
         let bar = 4.0 * 60.0 / bpm as f64; // 4 s at 60 bpm, 12 s at 20
         let duration = 400.0;
         let downbeats = grid(bar, duration);
-        for chorus_at in [0.0, 7.3, 50.0, 120.0, 233.3, 262.0] {
+        for chorus_at in [0.0f64, 7.3, 50.0, 120.0, 233.3, 262.0] {
             let sections = [
                 sec(0.0, chorus_at.max(1.0), VERSE, 0.5),
                 sec(chorus_at.max(1.0), chorus_at.max(1.0) + 40.0, CHORUS, 0.9),
@@ -142,7 +142,7 @@ fn choose_refuses_inconsistent_input() {
     let e = choose(&sections, &[], &[], None, 90.0, ClipKind::Drop).unwrap_err().to_string();
     assert!(e.contains('0') && e.contains('1'), "{e}");
     for bad in [sec(10.0, 10.0, CHORUS, 0.9), sec(10.0, 5.0, CHORUS, 0.9), sec(0.0, f64::NAN, CHORUS, 0.9)] {
-        let e = choose(&[bad.clone()], &[], &[0.1], None, 90.0, ClipKind::Drop).unwrap_err().to_string();
+        let e = choose(std::slice::from_ref(&bad), &[], &[0.1], None, 90.0, ClipKind::Drop).unwrap_err().to_string();
         assert!(e.contains(&format!("{}", bad.end)), "{e}");
     }
     for d in [0.0, -3.0, f64::NAN] {
@@ -217,6 +217,7 @@ fn flat_wav(dir: &std::path::Path, frames: usize) -> Source {
     }
 }
 
+#[allow(clippy::chunks_exact_to_as_chunks)]
 fn read_f32(path: &std::path::Path) -> Vec<f32> {
     let b = std::fs::read(path).unwrap();
     assert_eq!(&b[36..40], b"data", "trim writes a canonical 44-byte header");
@@ -315,4 +316,17 @@ fn a_clip_survives_the_plan_round_trip() {
     assert_eq!(v["clip"], "drop");
     assert_eq!(v["clip_span"], serde_json::json!([101.5, 121.5]));
     assert_eq!(RenderPlan::from_json(&j).unwrap(), p);
+}
+
+#[test]
+fn a_programmatic_caller_cannot_bypass_the_clip_seconds_check() {
+    let dir = Tmp::new("clip-seconds");
+    let src = flat_wav(&dir, PIPELINE_RATE as usize);
+    for v in [0.0, -2.0, f64::NAN] {
+        let mut args = projectmp4::render::plan::RenderArgs::new("flat.wav");
+        args.clip = ClipKind::Drop;
+        args.clip_seconds = Some(v);
+        let e = projectmp4::render::plan::render_plan_from_source(&args, src.clone()).unwrap_err().to_string();
+        assert!(e.contains("--clip-seconds") && e.contains(&format!("{v}")), "{e}");
+    }
 }
