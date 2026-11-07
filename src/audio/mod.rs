@@ -7,3 +7,4 @@ pub mod driver;
 pub use driver::{Driver, MAX_WINDOW_FRAMES};
 pub mod timeline;
 pub mod sections;
+pub mod stems;
