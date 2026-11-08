@@ -56,15 +56,26 @@ untrustworthy.
 
 ## Models
 
-`track-analysis/models/` is committed, 10 MB:
+`track-analysis/models/` is **not** committed. It is gitignored and filled by
+`./scripts/fetch-models.sh`, which must be run once after cloning:
 
-| file | bytes | purpose |
-|---|---|---|
-| `beat_this_small.onnx` | 10555592 | beat/downbeat inference (beat-this 1.1.0, small1) |
-| `mel_spectrogram.onnx` | 270742 | its mel front end |
+| file | bytes | sha256 begins | purpose |
+|---|---|---|---|
+| `beat_this_small.onnx` | 10555592 | `a5f8d39d989f3185` | beat/downbeat inference (beat-this 1.1.0, small1) |
+| `mel_spectrogram.onnx` | 270742 | `fdd59e65c5153313` | its mel front end |
 
-Committed rather than fetched on first use, deliberately: this is an offline tool and a render
-should never fail because a download did.
+Both come from [`danigb/beat-this-rs`](https://github.com/danigb/beat-this-rs) at commit
+`1ae768e78f1ad83b0ed3886241dc29ffde853c40` (tag v1.1.0), which commits them to its own
+`models/` directory. The published `beat-this` crate does not carry them. There is no official
+ONNX export of Beat This! from its authors, so these specific third-party bytes are the
+artefact that matters, and the script verifies each file's sha256 against the pin above rather
+than trusting the URL.
+
+This repository is public and carries what is needed to *build* it. 10 MB of weights nobody
+edits is a fetchable, pinnable external dependency, not source. An earlier revision committed
+them on the reasoning that an offline tool should not fail because a download did; the pin and
+the hash check are what make fetching them safe instead, and the fetch happens once rather than
+per render.
 
 ## External dependencies
 

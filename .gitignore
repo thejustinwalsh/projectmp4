@@ -4,3 +4,4 @@
 /.superpowers
 *.mp4
 /vendor/stems-runtime
+/crates/track-analysis/models

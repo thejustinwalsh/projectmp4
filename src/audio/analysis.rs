@@ -55,8 +55,8 @@ pub fn analyse_outcome(src: &Source, models: &Path, track_secs: Option<f64>) -> 
 fn compute(src: &Source, models: &Path, track_secs: Option<f64>) -> Result<Outcome> {
     let v = deck_track_analysis::analyze(models, &src.wav).map_err(|e| {
         Error::msg(format!(
-            "beat analysis could not run on {}: {e}. The analysis models are expected in {}; \
-             check that directory exists and holds the models",
+            "beat analysis could not run on {}: {e}. The analysis models are expected in {}. \
+             They are not committed: fetch them with ./scripts/fetch-models.sh",
             src.wav.display(),
             models.display()
         ))
