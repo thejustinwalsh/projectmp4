@@ -96,15 +96,11 @@ void VertexIndexArray::Update()
         return;
     }
 
-    if (m_veabSize == m_indices.size())
-    {
-        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, static_cast<GLsizei>(sizeof(uint32_t) * m_indices.size()), m_indices.data());
-    }
-    else
-    {
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizei>(sizeof(uint32_t) * m_indices.size()), m_indices.data(), VertexBufferUsageToGL(m_vboUsage));
-        m_veabSize = m_indices.size();
-    }
+    // Orphan rather than subdata-write, for the reason given in VertexBuffer.hpp:
+    // a subdata write into storage the GPU is still reading stalls Apple's
+    // Metal-backed GL driver for a full round trip.
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizei>(sizeof(uint32_t) * m_indices.size()), m_indices.data(), VertexBufferUsageToGL(m_vboUsage));
+    m_veabSize = m_indices.size();
 }
 
 auto VertexIndexArray::operator[](size_t index) -> uint32_t&

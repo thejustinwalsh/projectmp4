@@ -287,15 +287,16 @@ void VertexBuffer<VT>::Update()
         return;
     }
 
-    if (m_vboSize == m_vertices.size())
-    {
-        glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizei>(sizeof(VT) * m_vertices.size()), m_vertices.data());
-    }
-    else
-    {
-        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizei>(sizeof(VT) * m_vertices.size()), m_vertices.data(), VertexBufferUsageToGL(m_vboUsage));
-        m_vboSize = m_vertices.size();
-    }
+    // Always respecify the whole buffer ("orphaning") rather than writing into
+    // it with glBufferSubData. A subdata write targets storage the GPU may still
+    // be reading from the frame in flight, and Apple's Metal-backed GL driver
+    // cannot rename the buffer under us: it flushes the command queue and blocks
+    // for a full CPU-GPU round trip (gldBufferSubData -> flushResource ->
+    // flushContext -> submitCommandBuffer -> mach_msg). glBufferData lets the
+    // driver hand back fresh storage and return at once. Measured on an M-series
+    // Mac: the subdata path was 64% of a 1080p60 render's wall clock.
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizei>(sizeof(VT) * m_vertices.size()), m_vertices.data(), VertexBufferUsageToGL(m_vboUsage));
+    m_vboSize = m_vertices.size();
 }
 
 template<class VT>
