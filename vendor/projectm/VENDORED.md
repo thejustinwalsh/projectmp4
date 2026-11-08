@@ -28,9 +28,13 @@ own, applied on top of a commit of the pristine upstream tree.
 
 ## What was left out
 
-`docs/web/` — 28 MB of upstream's project website (images and generated
-pages). Nothing builds from it. Everything else upstream tracks at that commit
-is here, 927 files. To recover it, fetch the commit above from upstream.
+Two things, both of them bytes nothing builds from:
+
+- `docs/web/`, 28 MB of upstream's project website (images and generated pages).
+- `background.png`, 9.3 MB of upstream artwork at the tree root.
+
+Everything else upstream tracks at that commit is here, 926 files. To recover
+either, fetch the commit above from upstream.
 
 ## Local changes
 
