@@ -101,7 +101,7 @@ cargo test --test packs --test rank -- --ignored
 ```
 
 ```
-cargo test --no-fail-fast
+PROJECTMP4_REQUIRE_SAMPLES=1 cargo test --no-fail-fast
 ```
 
 The first is what a clone can run. `PROJECTMP4_NO_PARITY_ORACLE=1` opts out
@@ -118,8 +118,13 @@ preset-pack repository over the network. They are the only coverage the
 preset-selection pipeline has, including the only check that
 `presets/profiles.toml` has not gone stale against the ranked manifest.
 
-The third is the first command without the opt-out, and only the maintainer's
-machine can run it green.
+The third is the maintainer's: no parity opt-out, and
+`PROJECTMP4_REQUIRE_SAMPLES=1` so that a missing sample is a failure instead
+of a skip. That variable matters more than it looks, because `cargo test`
+captures a *passing* test's output and shows it only for failures — so the
+`SKIPPED:` lines are invisible in a normal run, and on a machine where the
+samples are supposed to exist a quietly broken checkout would read as 285
+green tests. Where you do want to see them, add `-- --nocapture`.
 
 Use `--no-fail-fast` throughout: plain `cargo test` stops at the first failing
 test binary and hides the rest.
