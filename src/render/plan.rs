@@ -9,7 +9,7 @@ use crate::audio::sections::clip::{self, ClipKind};
 use crate::audio::sections::LABELS;
 use crate::audio::timeline::{plan_switches_reporting, Cut, SwitchPoint};
 use crate::audio::{analyse_outcome, normalise, Analysis, Driver, Outcome};
-use crate::encode::{video_bitrate_kbps, Target, AUDIO_KBPS};
+use crate::encode::{video_bitrate_kbps, video_bitrate_kbps_fast, Target, AUDIO_KBPS};
 use crate::ffi::{Error, Result};
 use crate::presets::{default_cache_dir, Manifest, Packs};
 use crate::render::MarkStyle;
@@ -376,7 +376,13 @@ fn prepare_with(args: &RenderArgs, tmp: TempDir, mut src: crate::audio::Source) 
     // Fail before the minutes of analysis and the hours of rendering: an
     // impossible size target is known from the length alone.
     let shown = args.limit_seconds.map_or(wav_secs, |l| l.min(wav_secs));
-    let bitrate_kbps = video_bitrate_kbps(args.target, shown, AUDIO_KBPS)?;
+    // The two encoders size differently: only libx264's constant-quality mode
+    // has a measured cost that a capped target can be trusted to fit.
+    let bitrate_kbps = if args.fast {
+        video_bitrate_kbps_fast(args.target, shown, AUDIO_KBPS)?
+    } else {
+        video_bitrate_kbps(args.target, shown, AUDIO_KBPS)?
+    };
     // Beatless music (an ambient pad) gives the analyser nothing to find. That
     // is not a reason to refuse the track: switch on a fixed grid instead.
     // That applies only to an analyser that ran and found no beats. One that

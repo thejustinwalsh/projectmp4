@@ -64,9 +64,10 @@ pub const X_MAX_SECONDS: f64 = 140.0;
 /// The mp4 audio bitrate `ffmpeg_args` asks for.
 pub const AUDIO_KBPS: u32 = 256;
 
-/// The video bitrate (kbps) that makes `duration_s` of output fit `target`.
-/// `Ok(None)`: use CRF 17. `Ok(Some(k))`: cap at k kbps. `Err`: impossible.
-pub fn video_bitrate_kbps(target: Target, duration_s: f64, audio_kbps: u32) -> Result<Option<u32>> {
+/// The kbps `duration_s` of video may spend to fit `target`, once the audio
+/// track is paid for. `Ok(None)` is a target with no size cap; `Err` is a
+/// target that cannot be met at any bitrate.
+fn budget_kbps(target: Target, duration_s: f64, audio_kbps: u32) -> Result<Option<f64>> {
     if !duration_s.is_finite() || duration_s <= 0.0 {
         return Err(Error::msg(format!("cannot size a {duration_s} s render for --target {}", target.name())));
     }
@@ -85,9 +86,6 @@ pub fn video_bitrate_kbps(target: Target, duration_s: f64, audio_kbps: u32) -> R
         }
     };
     let budget = cap_bytes * 8.0 * MARGIN / duration_s / 1000.0 - audio_kbps as f64;
-    if budget >= CAP_CRF_AT {
-        return Ok(None);
-    }
     if budget < FLOOR_KBPS {
         return Err(Error::msg(format!(
             "{duration_s:.0} s will not fit --target {} at an acceptable quality: that leaves {:.1} Mb/s for \
@@ -97,10 +95,44 @@ pub fn video_bitrate_kbps(target: Target, duration_s: f64, audio_kbps: u32) -> R
             FLOOR_KBPS / 1000.0
         )));
     }
+    Ok(Some(budget))
+}
+
+/// The video bitrate (kbps) that makes `duration_s` of **libx264** output fit
+/// `target`. `Ok(None)`: use CRF 17. `Ok(Some(k))`: cap at k kbps. `Err`:
+/// impossible.
+///
+/// Use [`video_bitrate_kbps_fast`] for the `--fast` encoder: the `Ok(None)`
+/// here means "CRF 17 already fits", which rests on `CRF_KBPS`, a measurement
+/// of libx264 and of nothing else.
+pub fn video_bitrate_kbps(target: Target, duration_s: f64, audio_kbps: u32) -> Result<Option<u32>> {
+    let Some(budget) = budget_kbps(target, duration_s, audio_kbps)? else {
+        return Ok(None);
+    };
+    if budget >= CAP_CRF_AT {
+        return Ok(None);
+    }
     // Down, never up: rounding up spends margin we do not have.
     // Never ask for more than CRF 17 would spend: between the CRF cost and
     // CAP_CRF_AT a cap at the full budget would inflate the file.
     Ok(Some(budget.min(CRF_KBPS).floor() as u32))
+}
+
+/// The video bitrate (kbps) for the `--fast` encoder, h264_videotoolbox.
+///
+/// Unlike [`video_bitrate_kbps`] this never answers "constant quality fits".
+/// Constant quality on VideoToolbox is `-q:v 65`, whose cost is not `CRF_KBPS`
+/// and is not bounded by anything we have measured: on a real 1080p60 track it
+/// came out at 109 Mb/s, 6.8x libx264's CRF 17. Taking the `CAP_CRF_AT`
+/// shortcut on this encoder produced a 2.4 GB file for `--target discord`,
+/// which caps at 500 MB. So a capped target always gets an explicit bitrate
+/// here, and only an uncapped one (`none`, `youtube`) gets constant quality.
+///
+/// The budget is not clamped to `CRF_KBPS` either, for the same reason: that
+/// clamp asks for no more than libx264 would have spent, which says nothing
+/// about this encoder and would only give away cap headroom.
+pub fn video_bitrate_kbps_fast(target: Target, duration_s: f64, audio_kbps: u32) -> Result<Option<u32>> {
+    Ok(budget_kbps(target, duration_s, audio_kbps)?.map(|b| b.floor() as u32))
 }
 
 pub struct Encoder {

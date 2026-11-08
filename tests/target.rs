@@ -94,3 +94,51 @@ fn capping_never_asks_for_more_bitrate_than_crf_would_spend() {
     // Where the budget is already below CRF's cost it is used as is.
     assert_eq!(video_bitrate_kbps(Target::Discord, 240.0, 256).unwrap(), Some(15_077));
 }
+
+// --- The --fast encoder sizes differently from libx264 ---
+
+#[test]
+fn the_fast_encoder_never_trusts_constant_quality_to_fit_a_capped_target() {
+    use projectmp4::encode::video_bitrate_kbps_fast;
+    // Regression. 176.87 s at Discord's 500 MB leaves ~20.55 Mb/s, just over
+    // CAP_CRF_AT, so the libx264 sizing says "CRF 17 already fits" and caps
+    // nothing. On h264_videotoolbox that same None means `-q:v 65`, which
+    // measured 109 Mb/s on this content and wrote a 2.4 GB file against a
+    // 500 MB cap. The fast sizing must hand back a real bitrate.
+    assert_eq!(video_bitrate_kbps(Target::Discord, 176.87, 256).unwrap(), None);
+    let k = video_bitrate_kbps_fast(Target::Discord, 176.87, 256).unwrap().expect("a capped target must be capped");
+    assert_eq!(k, 20_550);
+    // And it has to be a bitrate the cap can actually hold.
+    let bytes = (k + 256) as f64 * 1000.0 * 176.87 / 8.0;
+    assert!(bytes <= 500e6, "{bytes} bytes over a 500 MB cap");
+
+    // The same hole on X: any clip short enough to be legal has a budget above
+    // CAP_CRF_AT, so every single --fast --target x render took the shortcut.
+    assert_eq!(video_bitrate_kbps(Target::X, 135.0, 256).unwrap(), None);
+    let k = video_bitrate_kbps_fast(Target::X, 135.0, 256).unwrap().expect("a capped target must be capped");
+    let bytes = (k + 256) as f64 * 1000.0 * 135.0 / 8.0;
+    assert!(bytes <= 512e6, "{bytes} bytes over a 512 MB cap");
+}
+
+#[test]
+fn the_fast_encoder_still_uses_constant_quality_where_nothing_caps_it() {
+    use projectmp4::encode::video_bitrate_kbps_fast;
+    for t in [Target::None, Target::YouTube] {
+        assert_eq!(video_bitrate_kbps_fast(t, 300.0, 256).unwrap(), None, "{t:?}");
+    }
+}
+
+#[test]
+fn the_fast_encoder_refuses_exactly_what_the_slow_one_refuses() {
+    use projectmp4::encode::video_bitrate_kbps_fast;
+    // Feasibility is a property of the target and the length, not the encoder.
+    for t in [Target::None, Target::Discord, Target::X, Target::YouTube] {
+        for d in [0.0, -1.0, f64::NAN, f64::INFINITY, 900.0, 180.0, 135.0, 60.0, 300.0] {
+            assert_eq!(
+                video_bitrate_kbps(t, d, 256).is_err(),
+                video_bitrate_kbps_fast(t, d, 256).is_err(),
+                "{t:?} {d}"
+            );
+        }
+    }
+}
