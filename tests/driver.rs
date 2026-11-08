@@ -8,10 +8,6 @@ fn tmpdir() -> Tmp {
     Tmp::new("driver")
 }
 
-fn source_for(p: &str) -> Source {
-    tmp::normalised(p)
-}
-
 /// Canonical 48 kHz stereo f32 WAV from interleaved samples.
 fn write_wav(path: &Path, pcm: &[f32]) {
     let data = (pcm.len() * 4) as u32;
@@ -47,7 +43,7 @@ fn mix_source(frames: usize, level: f32) -> (Tmp, Source) {
 
 #[test]
 fn loads_the_full_mix() {
-    let d = Driver::load(&source_for("samples/track.mp3")).unwrap();
+    let d = Driver::load(&tmp::click_source(40.0, 120.0)).unwrap();
     assert_eq!(d.rate, 48_000);
     assert!(!d.samples().is_empty());
 }
@@ -63,7 +59,7 @@ fn the_driver_is_exactly_the_decoded_wav() {
 
 #[test]
 fn window_past_end_of_track_is_silent_not_a_panic() {
-    let d = Driver::load(&source_for("samples/track.mp3")).unwrap();
+    let d = Driver::load(&tmp::click_source(40.0, 120.0)).unwrap();
     let past = d.window(1e6, 800);
     assert_eq!(past.len(), 1600);
     assert!(past.iter().all(|s| *s == 0.0));

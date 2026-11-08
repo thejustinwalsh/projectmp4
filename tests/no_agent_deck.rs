@@ -55,7 +55,8 @@ fn write_wav(path: &Path, pcm: &[f32]) {
 
 #[test]
 fn a_planted_agent_deck_cache_that_would_have_hit_is_ignored() {
-    let src = tmp::normalised("samples/track.mp3");
+    // 150 BPM so the planted 120 below is distinguishable from the real answer.
+    let src = tmp::click_source(30.0, 150.0);
     let secs = wav_frames(&src.wav).unwrap() as f64 / 48_000.0;
     let planted = [1.0, 2.0, 3.0, 4.0];
 

@@ -13,8 +13,21 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
-const MOTIF: &str = "samples/three-note-motif.m4a";
-const SIGNATURE: &str = "samples/three-note-signature.m4a";
+/// "A short track to render": generated, so these suites run in any checkout.
+/// The motif is 17 s because `no_black_run_reaches_one_second` wants at least
+/// 1000 decoded frames (17 s * 60 fps = 1020).
+fn motif_path() -> &'static str {
+    static P: OnceLock<String> = OnceLock::new();
+    P.get_or_init(|| tmp::click_file("m4a", 17.0, 120.0).to_str().unwrap().to_string())
+}
+fn long_path() -> &'static str {
+    static P: OnceLock<String> = OnceLock::new();
+    P.get_or_init(|| tmp::click_file("m4a", 60.0, 120.0).to_str().unwrap().to_string())
+}
+fn signature_path() -> &'static str {
+    static P: OnceLock<String> = OnceLock::new();
+    P.get_or_init(|| tmp::click_file("m4a", 12.0, 120.0).to_str().unwrap().to_string())
+}
 const FPS: u32 = 60;
 
 fn fixture(name: &str) -> PathBuf {
@@ -134,7 +147,7 @@ fn shared_dir(name: &str) -> PathBuf {
 fn motif() -> &'static RenderReport {
     static R: OnceLock<RenderReport> = OnceLock::new();
     R.get_or_init(|| {
-        let mut a = RenderArgs::new(MOTIF);
+        let mut a = RenderArgs::new(motif_path());
         a.out = Some(shared_dir("render_e2e_motif").join("motif.mp4"));
         render_report(&a).unwrap()
     })
@@ -145,7 +158,7 @@ fn motif() -> &'static RenderReport {
 fn broken_then_good() -> &'static RenderReport {
     static R: OnceLock<RenderReport> = OnceLock::new();
     R.get_or_init(|| {
-        let mut a = RenderArgs::new(SIGNATURE);
+        let mut a = RenderArgs::new(signature_path());
         a.presets = vec![fixture("unparsable.milk"), fixture("black.milk"), fixture("basic.milk")];
         a.out = Some(shared_dir("render_e2e_broken").join("out.mp4"));
         a.fast = true;
@@ -157,7 +170,7 @@ fn broken_then_good() -> &'static RenderReport {
 fn renders_a_short_track_end_to_end() {
     let r = motif();
     let p = probe(&r.out);
-    let input = input_duration(MOTIF);
+    let input = input_duration(motif_path());
     assert_eq!((p.width, p.height), (1920, 1080));
     assert_eq!(p.r_frame_rate, "60/1");
     // The video covers the input to within the one frame that `ceil` adds.
@@ -169,25 +182,33 @@ fn renders_a_short_track_end_to_end() {
     // The audio is the input, to within AAC's one-packet (1024 sample) padding.
     assert!((p.audio_duration - input).abs() <= 1024.0 / 48_000.0 + 1e-3, "audio {} s vs input {input} s", p.audio_duration);
     // Frame count against the input's decoded audio, not the output's own duration.
-    assert_frames(r, MOTIF);
+    assert_frames(r, motif_path());
 }
 
 #[test]
 fn title_and_artist_default_to_the_tags() {
+    // About one particular file's ID3 tags, so it needs that file.
+    if tmp::sample("samples/track.mp3").is_none() {
+        return;
+    }
     let a = RenderArgs::new("samples/track.mp3");
     let plan = render_plan(&a).unwrap();
     assert_eq!(plan.title, "Sunday Console Rite");
     assert_eq!(plan.artist.as_deref(), Some("tjdubz"));
 
-    // An explicit flag beats the tag; a file with no tags falls back to its name.
+    // An explicit flag beats the tag.
     let mut b = RenderArgs::new("samples/track.mp3");
     b.title = Some("Override".into());
     b.artist = Some("Someone".into());
     let plan = render_plan(&b).unwrap();
     assert_eq!((plan.title.as_str(), plan.artist.as_deref()), ("Override", Some("Someone")));
+}
 
-    let plan = render_plan(&RenderArgs::new(SIGNATURE)).unwrap();
-    assert_eq!((plan.title.as_str(), plan.artist.as_deref()), ("three-note-signature", None));
+#[test]
+fn title_and_artist_fall_back_to_the_filename_without_tags() {
+    let plan = render_plan(&RenderArgs::new(signature_path())).unwrap();
+    let stem = Path::new(signature_path()).file_stem().unwrap().to_str().unwrap().to_string();
+    assert_eq!((plan.title.as_str(), plan.artist.as_deref()), (stem.as_str(), None));
 }
 
 #[test]
@@ -210,7 +231,7 @@ fn a_broken_preset_is_skipped_not_fatal() {
     // Only the good preset ran, for every segment.
     assert_eq!(r.played.len(), r.plan.preset_sequence.len());
     assert!(r.played.iter().all(|p| p == &good), "{:?}", r.played);
-    assert_frames(r, SIGNATURE);
+    assert_frames(r, signature_path());
 
     // And the picture is the good preset's: not black, and not the idle logo
     // projectM shows when a load fails (which lights ~99% of pixels; basic.milk ~28%).
@@ -245,7 +266,7 @@ fn output_is_upright_not_flipped() {
     // watermark sits bottom-left and the title top-right. Compositing first and
     // flipping after moves them to top-left and bottom-right while leaving (1)
     // correct, so (1) alone would not catch it.
-    let mut a = RenderArgs::new(SIGNATURE);
+    let mut a = RenderArgs::new(signature_path());
     a.presets = vec![fixture("top_line.milk")];
     // The clip is 12.01 s with one soft cut at 8.46 s. projectM then crossfades for 3 s
     // with a random transition shader, which can blend the square away (samples at
@@ -287,8 +308,8 @@ fn plan_of(p: &str) -> RenderPlan {
 fn plan_is_structurally_deterministic() {
     // NOT sha256 equality: libprojectM seeds hue offsets from std::random_device and noise
     // textures from the system clock, so two renders of one preset differ in ~28% of pixels.
-    let a = plan_of(SIGNATURE);
-    let b = plan_of(SIGNATURE);
+    let a = plan_of(signature_path());
+    let b = plan_of(signature_path());
     assert_eq!(a.switches, b.switches); // same times AND same Cut kinds
     assert_eq!(a.preset_sequence, b.preset_sequence);
     assert_eq!(a.total_frames, b.total_frames);
@@ -298,12 +319,12 @@ fn plan_is_structurally_deterministic() {
     assert_eq!(a.preset_sequence.len(), a.switches.len() + 1);
     assert_ne!(a.preset_sequence[0], a.preset_sequence[1], "every segment got the same preset");
     // Sized by the decoded audio (12.0135 s: AAC padding; the container says 12.000).
-    assert_eq!(a.total_frames, expected_frames(SIGNATURE));
+    assert_eq!(a.total_frames, expected_frames(signature_path()));
 }
 
 #[test]
 fn dump_plan_round_trips() {
-    let plan = plan_of(SIGNATURE);
+    let plan = plan_of(signature_path());
     let j = plan.to_json();
     let back = RenderPlan::from_json(&j).unwrap();
     assert_eq!(back.preset_sequence, plan.preset_sequence);
@@ -514,6 +535,11 @@ fn preset_switches_land_on_their_planned_frames() {
     // red and blue are solid, so the preset on screen is readable from the video.
     use projectmp4::audio::timeline::Cut;
     let (red, blue) = (fixture("red.milk"), fixture("blue.milk"));
+    // About the music: which switches are Hard comes from drops in a real
+    // arrangement, and a click track has none (it plans Hard, Hard, Hard...).
+    if tmp::sample("samples/ravezilla.m4a").is_none() {
+        return;
+    }
     let mut a = RenderArgs::new("samples/ravezilla.m4a");
     a.presets = vec![red.clone(), blue.clone()];
     a.limit_seconds = Some(40.0);
@@ -595,18 +621,14 @@ fn preset_switches_land_on_their_planned_frames() {
 #[test]
 fn render_length_follows_the_audio_it_is_muxed_with() {
     // The WAV that ffmpeg muxes (and `-shortest` trims to) sets the video length.
-    let plan = render_plan(&RenderArgs::new("samples/ravezilla.m4a")).unwrap();
+    let plan = render_plan(&RenderArgs::new(long_path())).unwrap();
     let o = Command::new("ffmpeg")
-        .args(["-v", "error", "-nostdin", "-i", "samples/ravezilla.m4a", "-vn", "-ac", "2", "-ar", "48000", "-f", "f32le", "-"])
+        .args(["-v", "error", "-nostdin", "-i", long_path(), "-vn", "-ac", "2", "-ar", "48000", "-f", "f32le", "-"])
         .output()
         .unwrap();
     assert!(o.status.success());
     let audio_frames = o.stdout.len() / 8;
     assert_eq!(plan.total_frames, (audio_frames as f64 / 48_000.0 * FPS as f64).ceil() as u64);
-}
-
-fn abs_sample(name: &str) -> String {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("samples").join(name).to_str().unwrap().to_string()
 }
 
 fn pinned_cotc_commit() -> String {
@@ -621,12 +643,12 @@ fn pinned_cotc_commit() -> String {
 #[test]
 fn dump_plan_cli_writes_a_plan_and_renders_nothing() {
     let tmp = Tmp::new("e2e");
-    let input = abs_sample("three-note-signature.m4a");
+    let input = signature_path();
     let path = tmp.0.join("plan.json");
     // Run in the temp dir: a render would drop <stem>.mp4 into the working directory.
     let o = Command::new(env!("CARGO_BIN_EXE_projectmp4"))
         .current_dir(&tmp.0)
-        .args(["render", &input, "--watermark-style", "sigil", "--static-overlay", "--fast", "--flash-guard", "--flash-rate", "0.3", "--title", "T", "--dump-plan"])
+        .args(["render", input, "--watermark-style", "sigil", "--static-overlay", "--fast", "--flash-guard", "--flash-rate", "0.3", "--title", "T", "--dump-plan"])
         .arg(&path)
         .output()
         .unwrap();
@@ -647,7 +669,7 @@ fn dump_plan_cli_writes_a_plan_and_renders_nothing() {
     assert_eq!(dumped.title, "T");
     assert_eq!(dumped.packs_revision.as_deref(), Some(pinned_cotc_commit().as_str()));
     // And the same arguments through the library give the same plan.
-    let mut a = RenderArgs::new(&input);
+    let mut a = RenderArgs::new(input);
     a.watermark_style = projectmp4::render::MarkStyle::Sigil;
     a.static_overlay = true;
     a.fast = true;
@@ -656,15 +678,15 @@ fn dump_plan_cli_writes_a_plan_and_renders_nothing() {
     a.title = Some("T".into());
     assert_eq!(dumped, render_plan(&a).unwrap());
     // The default is the wordmark: nothing selects the sigil unless asked.
-    assert_eq!(render_plan(&RenderArgs::new(&input)).unwrap().watermark_style, projectmp4::render::MarkStyle::Word);
+    assert_eq!(render_plan(&RenderArgs::new(input)).unwrap().watermark_style, projectmp4::render::MarkStyle::Word);
     // The guard is off unless asked for, and carries the measured limit when it is.
-    let d = render_plan(&RenderArgs::new(&input)).unwrap();
+    let d = render_plan(&RenderArgs::new(input)).unwrap();
     assert!(!d.flash_guard && d.flash_rate == 0.48, "{} {}", d.flash_guard, d.flash_rate);
 }
 
 #[test]
 fn a_plan_only_claims_a_pack_revision_when_it_used_the_packs() {
-    let mut a = RenderArgs::new(SIGNATURE);
+    let mut a = RenderArgs::new(signature_path());
     assert_eq!(render_plan(&a).unwrap().packs_revision.as_deref(), Some(pinned_cotc_commit().as_str()));
     a.presets = vec![fixture("red.milk")];
     assert_eq!(render_plan(&a).unwrap().packs_revision, None);
@@ -673,12 +695,12 @@ fn a_plan_only_claims_a_pack_revision_when_it_used_the_packs() {
 #[test]
 fn limit_seconds_rejects_nonsense_and_a_limited_plan_describes_itself() {
     let tmp = Tmp::new("e2e");
-    let input = abs_sample("three-note-signature.m4a");
+    let input = signature_path();
     for bad in ["0", "-1", "nan", "inf", "abc"] {
         let o = Command::new(env!("CARGO_BIN_EXE_projectmp4"))
             .current_dir(&tmp.0)
             .arg("render")
-            .arg(&input)
+            .arg(input)
             .arg(format!("--limit-seconds={bad}"))
             .output()
             .unwrap();
@@ -692,14 +714,14 @@ fn limit_seconds_rejects_nonsense_and_a_limited_plan_describes_itself() {
     assert_eq!(std::fs::read_dir(&tmp.0).unwrap().count(), 0, "a rejected limit must not render");
     // The library refuses too (not only the CLI parser).
     for bad in [0.0, -3.0, f64::NAN, f64::INFINITY] {
-        let mut a = RenderArgs::new(SIGNATURE);
+        let mut a = RenderArgs::new(signature_path());
         a.limit_seconds = Some(bad);
         assert!(render_plan(&a).is_err(), "{bad}");
     }
 
     // A 5 s limit on a 12 s track whose only switch is at 8.46 s: the plan says
     // 5 s, 300 frames and no switch, and records the limit.
-    let mut a = RenderArgs::new(SIGNATURE);
+    let mut a = RenderArgs::new(signature_path());
     a.limit_seconds = Some(5.0);
     let p = render_plan(&a).unwrap();
     assert_eq!((p.duration, p.total_frames, p.limit_seconds), (5.0, 300, Some(5.0)));
@@ -709,7 +731,7 @@ fn limit_seconds_rejects_nonsense_and_a_limited_plan_describes_itself() {
     // A limit past the end changes nothing but the record of it.
     a.limit_seconds = Some(100.0);
     let full = render_plan(&a).unwrap();
-    assert_eq!(full.total_frames, expected_frames(SIGNATURE));
+    assert_eq!(full.total_frames, expected_frames(signature_path()));
     assert_eq!(full.switches.len(), 1);
 }
 
@@ -755,7 +777,7 @@ fn a_beatless_track_plans_on_a_fixed_grid_when_the_analyser_works() {
 fn a_plan_dumped_by_an_older_version_still_loads() {
     // Adding a field must never invalidate an existing plan: strip every field
     // added after the first version and the rest must load, with defaults.
-    let plan = plan_of(SIGNATURE);
+    let plan = plan_of(signature_path());
     let mut v: serde_json::Value = serde_json::from_str(&plan.to_json()).unwrap();
     for k in ["limit_seconds", "watermark_style", "static_overlay", "fast", "flash_guard", "flash_rate", "packs_revision"] {
         assert!(v.as_object_mut().unwrap().remove(k).is_some(), "{k} was not in the dump");
@@ -778,7 +800,7 @@ fn a_valid_limit_seconds_renders_that_much_through_the_cli() {
     let o = Command::new(env!("CARGO_BIN_EXE_projectmp4"))
         .current_dir(&tmp.0)
         .arg("render")
-        .arg(abs_sample("three-note-signature.m4a"))
+        .arg(signature_path())
         .args(["--limit-seconds", "2", "--fast", "--preset"])
         .arg(fixture("red.milk"))
         .arg("--out")
@@ -795,12 +817,12 @@ fn a_valid_limit_seconds_renders_that_much_through_the_cli() {
 #[test]
 fn an_unusable_frame_rate_is_rejected_not_looped_on() {
     let tmp = Tmp::new("e2e");
-    let input = abs_sample("three-note-signature.m4a");
+    let input = signature_path();
     for bad in ["0", "1", "9", "241", "1000", "abc"] {
         let o = Command::new(env!("CARGO_BIN_EXE_projectmp4"))
             .current_dir(&tmp.0)
             .arg("render")
-            .arg(&input)
+            .arg(input)
             .arg(format!("--fps={bad}"))
             .output()
             .unwrap();
@@ -811,11 +833,11 @@ fn an_unusable_frame_rate_is_rejected_not_looped_on() {
     }
     assert_eq!(std::fs::read_dir(&tmp.0).unwrap().count(), 0);
     for bad in [0u32, 1, 9, 241] {
-        let mut a = RenderArgs::new(SIGNATURE);
+        let mut a = RenderArgs::new(signature_path());
         a.fps = bad;
         assert!(render_plan(&a).is_err(), "fps {bad}");
     }
-    let mut a = RenderArgs::new(SIGNATURE);
+    let mut a = RenderArgs::new(signature_path());
     a.fps = 10;
     assert_eq!(render_plan(&a).unwrap().fps, 10);
 }

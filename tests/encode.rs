@@ -9,7 +9,11 @@ use std::time::Duration;
 mod tmp;
 use tmp::Tmp;
 
-const AUDIO: &str = "samples/track.mp3";
+/// Any audio stream will do: the encoder muxes it, whatever it is. 30 s so the
+/// audio is never the shorter stream under `-shortest`.
+fn audio() -> PathBuf {
+    tmp::click_file("wav", 30.0, 120.0)
+}
 
 fn grey_frame(w: u32, h: u32) -> Vec<u8> {
     vec![128; w as usize * h as usize * 4]
@@ -53,7 +57,7 @@ fn ffprobe(p: &Path) -> Probe {
 fn produces_a_playable_1080p60_mp4_with_audio() {
     let t = Tmp::new("encode");
     let out = t.0.join("o.mp4");
-    let mut e = Encoder::start(&out, Path::new(AUDIO), 1920, 1080, 60, false, None).unwrap();
+    let mut e = Encoder::start(&out, &audio(), 1920, 1080, 60, false, None).unwrap();
     for _ in 0..120 {
         e.write_frame(&grey_frame(1920, 1080)).unwrap();
     }
@@ -93,7 +97,7 @@ fn the_output_is_faststart_with_moov_before_mdat() {
     for fast in [false, true] {
         let t = Tmp::new("encode");
         let out = t.0.join("o.mp4");
-        let mut e = Encoder::start(&out, Path::new(AUDIO), 320, 180, 30, fast, None).unwrap();
+        let mut e = Encoder::start(&out, &audio(), 320, 180, 30, fast, None).unwrap();
         for _ in 0..30 {
             e.write_frame(&grey_frame(320, 180)).unwrap();
         }
@@ -127,7 +131,7 @@ fn the_output_is_faststart_with_moov_before_mdat() {
 fn fast_path_produces_h264_with_audio() {
     let t = Tmp::new("encode");
     let out = t.0.join("f.mp4");
-    let mut e = Encoder::start(&out, Path::new(AUDIO), 320, 180, 30, true, None).unwrap();
+    let mut e = Encoder::start(&out, &audio(), 320, 180, 30, true, None).unwrap();
     for _ in 0..30 {
         e.write_frame(&grey_frame(320, 180)).unwrap();
     }
@@ -188,7 +192,7 @@ fn overwrites_an_existing_output_instead_of_reading_frames_as_the_answer() {
     let t = Tmp::new("encode");
     let out = t.0.join("o.mp4");
     std::fs::write(&out, b"stale").unwrap();
-    let mut e = Encoder::start(&out, Path::new(AUDIO), 320, 180, 30, false, None).unwrap();
+    let mut e = Encoder::start(&out, &audio(), 320, 180, 30, false, None).unwrap();
     for _ in 0..10 {
         e.write_frame(&grey_frame(320, 180)).unwrap();
     }
@@ -199,7 +203,7 @@ fn overwrites_an_existing_output_instead_of_reading_frames_as_the_answer() {
 #[test]
 fn rejects_a_wrong_sized_frame() {
     let t = Tmp::new("encode");
-    let mut e = Encoder::start(&t.0.join("o.mp4"), Path::new(AUDIO), 320, 180, 30, false, None).unwrap();
+    let mut e = Encoder::start(&t.0.join("o.mp4"), &audio(), 320, 180, 30, false, None).unwrap();
     let err = e.write_frame(&[0u8; 10]).unwrap_err();
     assert!(err.0.contains("10 bytes") && err.0.contains("230400"), "{}", err.0);
 }
@@ -219,7 +223,7 @@ fn ffmpeg_rejecting_the_output_surfaces_its_stderr() {
     let t = Tmp::new("encode");
     // Parent directory does not exist: ffmpeg starts, then fails to open the output.
     let out = t.0.join("missing-dir").join("o.mp4");
-    let e = Encoder::start(&out, Path::new(AUDIO), 320, 180, 30, false, None).unwrap();
+    let e = Encoder::start(&out, &audio(), 320, 180, 30, false, None).unwrap();
     let msg = first_error(e, 20);
     assert!(msg.contains(&out.display().to_string()), "path missing: {msg}");
     // Text that only ffmpeg's own stderr can supply.
@@ -256,7 +260,7 @@ fn stderr_is_drained_and_only_its_tail_is_kept() {
     let out2 = out.clone();
     std::thread::spawn(move || {
         let r = (|| {
-            let mut e = Encoder::start_with_program(&program, &out2, Path::new(AUDIO), 320, 180, 30, false, None)?;
+            let mut e = Encoder::start_with_program(&program, &out2, &audio(), 320, 180, 30, false, None)?;
             for _ in 0..2 {
                 e.write_frame(&grey_frame(320, 180))?;
             }
@@ -280,7 +284,7 @@ fn ffmpeg_failing_on_its_own_after_accepting_frames_surfaces() {
     let t = Tmp::new("encode");
     let program = stub(&t.0, "s", "head -c 460800 >/dev/null\necho 'stub: boom' >&2\nexit 3");
     let out = t.0.join("o.mp4");
-    let mut e = Encoder::start_with_program(&program, &out, Path::new(AUDIO), 320, 180, 30, false, None).unwrap();
+    let mut e = Encoder::start_with_program(&program, &out, &audio(), 320, 180, 30, false, None).unwrap();
     for i in 0..2 {
         e.write_frame(&grey_frame(320, 180)).unwrap_or_else(|err| panic!("frame {i}: {}", err.0));
     }
@@ -308,7 +312,7 @@ fn exit_zero_without_a_fresh_output_file_is_an_error() {
     let empty = stub(&t.0, "empty", "cat >/dev/null\n: > \"$OUT\"\nexit 0");
 
     let out = t.0.join("none.mp4");
-    let mut e = Encoder::start_with_program(&nothing, &out, Path::new(AUDIO), 16, 16, 30, false, None).unwrap();
+    let mut e = Encoder::start_with_program(&nothing, &out, &audio(), 16, 16, 30, false, None).unwrap();
     e.write_frame(&grey_frame(16, 16)).unwrap();
     let msg = e.finish().unwrap_err().0.into_owned();
     assert!(msg.contains(&out.display().to_string()) && msg.contains("missing"), "{msg}");
@@ -316,7 +320,7 @@ fn exit_zero_without_a_fresh_output_file_is_an_error() {
     assert!(parts(&out).is_empty(), ".part left behind");
 
     let out = t.0.join("zero-length.mp4");
-    let e = Encoder::start_with_program(&empty, &out, Path::new(AUDIO), 16, 16, 30, false, None).unwrap();
+    let e = Encoder::start_with_program(&empty, &out, &audio(), 16, 16, 30, false, None).unwrap();
     let msg = e.finish().unwrap_err().0.into_owned();
     assert!(msg.contains("wrote an empty"), "{msg}");
     assert!(!out.exists(), "failed encode published a file");
@@ -325,7 +329,7 @@ fn exit_zero_without_a_fresh_output_file_is_an_error() {
     // A previous good video survives a failed re-render untouched.
     let out = t.0.join("prev.mp4");
     std::fs::write(&out, b"old video").unwrap();
-    let e = Encoder::start_with_program(&nothing, &out, Path::new(AUDIO), 16, 16, 30, false, None).unwrap();
+    let e = Encoder::start_with_program(&nothing, &out, &audio(), 16, 16, 30, false, None).unwrap();
     assert!(e.finish().is_err());
     assert_eq!(std::fs::read(&out).unwrap(), b"old video");
     assert!(parts(&out).is_empty(), ".part left behind");
@@ -336,7 +340,7 @@ fn success_publishes_the_part_at_the_final_path() {
     let t = Tmp::new("encode");
     let ok = stub(&t.0, "ok", "cat >/dev/null\necho video > \"$OUT\"\nexit 0");
     let out = t.0.join("o.mp4");
-    let e = Encoder::start_with_program(&ok, &out, Path::new(AUDIO), 16, 16, 30, false, None).unwrap();
+    let e = Encoder::start_with_program(&ok, &out, &audio(), 16, 16, 30, false, None).unwrap();
     assert!(!out.exists());
     e.finish().unwrap();
     assert_eq!(std::fs::read(&out).unwrap(), b"video\n");
@@ -348,7 +352,7 @@ fn failure_after_frames_leaves_neither_part_nor_output() {
     let t = Tmp::new("encode");
     let program = stub(&t.0, "s", "echo partial > \"$OUT\"\nhead -c 460800 >/dev/null\nexit 3");
     let out = t.0.join("o.mp4");
-    let mut e = Encoder::start_with_program(&program, &out, Path::new(AUDIO), 320, 180, 30, false, None).unwrap();
+    let mut e = Encoder::start_with_program(&program, &out, &audio(), 320, 180, 30, false, None).unwrap();
     for _ in 0..2 {
         e.write_frame(&grey_frame(320, 180)).unwrap();
     }
@@ -361,7 +365,7 @@ fn dropping_an_unfinished_encoder_removes_the_part() {
     let t = Tmp::new("encode");
     let program = stub(&t.0, "s", "echo partial > \"$OUT\"\ncat >/dev/null");
     let out = t.0.join("o.mp4");
-    let e = Encoder::start_with_program(&program, &out, Path::new(AUDIO), 16, 16, 30, false, None).unwrap();
+    let e = Encoder::start_with_program(&program, &out, &audio(), 16, 16, 30, false, None).unwrap();
     // Wait for the stub to create the .part before dropping.
     for _ in 0..200 {
         if !parts(&out).is_empty() {
@@ -377,10 +381,10 @@ fn dropping_an_unfinished_encoder_removes_the_part() {
 #[test]
 fn absurd_dimensions_are_rejected_not_wrapped() {
     let t = Tmp::new("encode");
-    let r = Encoder::start(&t.0.join("o.mp4"), Path::new(AUDIO), u32::MAX, u32::MAX, 30, false, None);
+    let r = Encoder::start(&t.0.join("o.mp4"), &audio(), u32::MAX, u32::MAX, 30, false, None);
     assert!(r.is_err());
     for (w, h) in [(0, 1080), (1920, 0), (0, 0)] {
-        let e = Encoder::start(&t.0.join("z.mp4"), Path::new(AUDIO), w, h, 30, false, None).err().expect("zero size must be rejected");
+        let e = Encoder::start(&t.0.join("z.mp4"), &audio(), w, h, 30, false, None).err().expect("zero size must be rejected");
         assert!(e.0.contains(&format!("{w}x{h}")), "{}", e.0);
     }
 }
@@ -392,7 +396,7 @@ fn a_stale_staging_file_is_never_published() {
     let out = t.0.join("o.mp4");
     let part = t.0.join("o.mp4.part.stale");
     std::fs::write(&part, b"stale bytes").unwrap();
-    let e = Encoder::start_staged(&nothing, &out, &part, Path::new(AUDIO), 16, 16, 30, false, None).unwrap();
+    let e = Encoder::start_staged(&nothing, &out, &part, &audio(), 16, 16, 30, false, None).unwrap();
     assert!(e.finish().is_err(), "stale staging file passed for output");
     assert!(!out.exists(), "stale bytes published");
     assert!(!part.exists());
@@ -407,7 +411,7 @@ fn an_unremovable_staging_path_is_an_error_not_ignored() {
     let part = t.0.join("o.mp4.part.dir");
     std::fs::create_dir(&part).unwrap();
     std::fs::write(part.join("x"), b"x").unwrap();
-    let r = Encoder::start_staged(&nothing, &out, &part, Path::new(AUDIO), 16, 16, 30, false, None);
+    let r = Encoder::start_staged(&nothing, &out, &part, &audio(), 16, 16, 30, false, None);
     let msg = r.err().expect("removal failure must be reported").0.into_owned();
     assert!(msg.contains("o.mp4.part.dir"), "{msg}");
     assert!(!out.exists());
@@ -428,8 +432,8 @@ fn concurrent_renders_to_one_output_do_not_share_staging() {
     };
     let (pa, pb) = (mk("A"), mk("B"));
     let out = t.0.join("o.mp4");
-    let ea = Encoder::start_with_program(&pa, &out, Path::new(AUDIO), 16, 16, 30, false, None).unwrap();
-    let eb = Encoder::start_with_program(&pb, &out, Path::new(AUDIO), 16, 16, 30, false, None).unwrap();
+    let ea = Encoder::start_with_program(&pa, &out, &audio(), 16, 16, 30, false, None).unwrap();
+    let eb = Encoder::start_with_program(&pb, &out, &audio(), 16, 16, 30, false, None).unwrap();
     for _ in 0..500 {
         if t.0.join("ready-A").exists() && t.0.join("ready-B").exists() {
             break;
@@ -451,7 +455,7 @@ fn a_staging_path_that_is_the_output_is_rejected_and_the_old_video_survives() {
     let nothing = stub(&t.0, "nothing", "cat >/dev/null\nexit 0");
     let out = t.0.join("o.mp4");
     std::fs::write(&out, b"previous render").unwrap();
-    let r = Encoder::start_staged(&nothing, &out, &out, Path::new(AUDIO), 16, 16, 30, false, None);
+    let r = Encoder::start_staged(&nothing, &out, &out, &audio(), 16, 16, 30, false, None);
     // Destructive consequence first: the old video must be byte-identical.
     assert_eq!(std::fs::read(&out).ok().as_deref(), Some(&b"previous render"[..]), "existing output was destroyed");
     let msg = r.err().expect("part == out must be rejected").0.into_owned();
@@ -466,7 +470,7 @@ fn a_staging_path_in_another_directory_is_rejected() {
     std::fs::create_dir(&sub).unwrap();
     let out = t.0.join("o.mp4");
     let part = sub.join("o.mp4.part.x");
-    let msg = Encoder::start_staged(&nothing, &out, &part, Path::new(AUDIO), 16, 16, 30, false, None)
+    let msg = Encoder::start_staged(&nothing, &out, &part, &audio(), 16, 16, 30, false, None)
         .err()
         .expect("cross-directory staging must be rejected")
         .0
@@ -482,7 +486,7 @@ fn a_zero_exit_mid_stream_fails_the_write_without_publishing() {
     let program = stub(&t.0, "s", "head -c 460800 >/dev/null\necho truncated > \"$OUT\"\nexit 0");
     let out = t.0.join("o.mp4");
     std::fs::write(&out, b"previous render").unwrap();
-    let mut e = Encoder::start_with_program(&program, &out, Path::new(AUDIO), 320, 180, 30, false, None).unwrap();
+    let mut e = Encoder::start_with_program(&program, &out, &audio(), 320, 180, 30, false, None).unwrap();
     let mut failure = None;
     for _ in 0..50 {
         if let Err(err) = e.write_frame(&grey_frame(320, 180)) {
@@ -520,7 +524,7 @@ fn a_new_run_sweeps_staging_files_orphaned_by_dead_processes() {
     let unparseable = mk("o.mp4.part.stale".to_string());
     let unrelated = mk("o.mp4.partial".to_string());
     let ok = stub(&t.0, "ok", "cat >/dev/null\necho video > \"$OUT\"\nexit 0");
-    let e = Encoder::start_with_program(&ok, &out, Path::new(AUDIO), 16, 16, 30, false, None).unwrap();
+    let e = Encoder::start_with_program(&ok, &out, &audio(), 16, 16, 30, false, None).unwrap();
     assert!(!orphan.exists(), "dead process's staging file survived");
     for keep in [&alive, &other_output, &unparseable, &unrelated] {
         assert!(keep.exists(), "{} must not be swept", keep.display());

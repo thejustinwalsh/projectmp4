@@ -4,15 +4,23 @@ use projectmp4::audio::normalise::PIPELINE_RATE;
 #[path = "common/tmp.rs"]
 mod tmp;
 use tmp::Tmp;
-use projectmp4::audio::{normalise, Analysis, Driver};
+use projectmp4::audio::{normalise, Analysis, Driver, Source};
 use std::path::Path;
 
-const RAVEZILLA: &str = "samples/ravezilla.m4a";
-const THREE_NOTE_MOTIF: &str = "samples/three-note-motif.m4a";
-const THREE_NOTE_SIGNATURE: &str = "samples/three-note-signature.m4a";
+/// A generated click track standing in for a full-length song / a short motif /
+/// a shorter signature. The switch bounds below are derived from the analysed
+/// downbeat spacing, so they hold for any track, not just a particular one.
+fn long_track() -> Source {
+    tmp::click_source(60.0, 120.0)
+}
+fn motif() -> Source {
+    tmp::click_source(16.0, 120.0)
+}
+fn signature() -> Source {
+    tmp::click_source(12.0, 120.0)
+}
 
-fn fixture(p: &str) -> (Analysis, Driver) {
-    let src = tmp::normalised(p);
+fn fixture(src: Source) -> (Analysis, Driver) {
     let a = analyse(&src, Path::new(DEFAULT_MODELS)).unwrap();
     let d = Driver::load(&src).unwrap();
     (a, d)
@@ -20,7 +28,7 @@ fn fixture(p: &str) -> (Analysis, Driver) {
 
 #[test]
 fn every_switch_lands_exactly_on_a_downbeat() {
-    let (a, d) = fixture(RAVEZILLA);
+    let (a, d) = fixture(long_track());
     let sw = plan_switches(&a, &d, 8.0, 4.0);
     // No two switches are closer than drop_gap, so duration / drop_gap bounds the count above.
     // After a kept switch the next eligible downbeat arrives within about one downbeat period
@@ -41,7 +49,7 @@ fn every_switch_lands_exactly_on_a_downbeat() {
 
 #[test]
 fn respects_the_minimum_gap_except_at_drops() {
-    let (a, d) = fixture(RAVEZILLA);
+    let (a, d) = fixture(long_track());
     let sw = plan_switches(&a, &d, 8.0, 4.0);
     assert!(sw.len() >= 2, "need at least two switches, got {}", sw.len());
     // The opening preset counts as a switch at t = 0, so the first gap is real.
@@ -58,7 +66,10 @@ fn respects_the_minimum_gap_except_at_drops() {
 
 #[test]
 fn drops_get_hard_cuts() {
-    let (a, d) = fixture(RAVEZILLA);
+    // About the music: a drop is a change in a real arrangement, and a click
+    // track has none (every switch comes out Soft).
+    let Some(src) = tmp::sample("samples/ravezilla.m4a") else { return };
+    let (a, d) = fixture(src);
     let sw = plan_switches(&a, &d, 8.0, 4.0);
     assert!(sw.iter().any(|s| s.cut == Cut::Hard), "no Hard cut: drops are not detected");
     assert!(sw.iter().any(|s| s.cut == Cut::Soft), "no Soft cut: every switch was hard");
@@ -66,11 +77,11 @@ fn drops_get_hard_cuts() {
 
 #[test]
 fn track_shorter_than_min_gap_yields_no_switches() {
-    let (a, d) = fixture(THREE_NOTE_MOTIF);
+    let (a, d) = fixture(motif());
     let sw = plan_switches(&a, &d, 8.0, 4.0);
     assert!(sw.len() <= 2, "{} switches on a {:.1} s track with min_gap 8", sw.len(), a.duration);
     assert!(sw.iter().all(|s| s.t < a.duration));
-    let (a, d) = fixture(THREE_NOTE_SIGNATURE);
+    let (a, d) = fixture(signature());
     assert_eq!(plan_switches(&a, &d, 20.0, 20.0).len(), 0);
 }
 

@@ -40,9 +40,14 @@ fn sha256_of_file(p: &str) -> String {
 
 #[test]
 fn normalises_mp3_to_48k_wav() {
-    let s = tmp::normalised("samples/track.mp3");
+    let path = tmp::click_file("mp3", 30.0, 120.0);
+    let s = tmp::normalised(path.to_str().unwrap());
     assert_eq!(wav_sample_rate(&s.wav), 48_000);
-    assert!((s.duration - 219.744).abs() < 0.05);
+    // 0.05 s is the tolerance this test has always carried, and it is the input
+    // container's slack rather than the pipeline's: mp3 is not sample-exact, so a
+    // 30 s source reports 30.024 s — one frame of encoder padding, 1152 samples at
+    // 48 kHz. The decoded wav is tighter than that (30.000125 s, measured).
+    assert!((s.duration - 30.0).abs() < 0.05, "duration {}", s.duration);
 }
 
 #[test]
@@ -115,7 +120,7 @@ fn ffmpeg_failure_after_writing_part_removes_it() {
 
 #[test]
 fn reads_suno_id3_tags() {
-    let s = tmp::normalised("samples/track.mp3");
+    let Some(s) = tmp::sample("samples/track.mp3") else { return };
     assert_eq!(s.title.as_deref(), Some("Sunday Console Rite"));
     assert_eq!(s.artist.as_deref(), Some("tjdubz"));
 }
@@ -123,16 +128,27 @@ fn reads_suno_id3_tags() {
 #[test]
 fn sha256_is_of_the_original_file_not_the_wav() {
     let (da, db) = (tmpdir(), tmpdir());
-    let a = normalise(Path::new("samples/track.mp3"), &da).unwrap();
-    let b = normalise(Path::new("samples/track.mp3"), &db).unwrap();
+    let mp3 = tmp::click_file("mp3", 30.0, 120.0);
+    let a = normalise(&mp3, &da).unwrap();
+    let b = normalise(&mp3, &db).unwrap();
     assert_eq!(a.sha256, b.sha256);
-    assert_eq!(a.sha256, sha256_of_file("samples/track.mp3"));
+    assert_eq!(a.sha256, sha256_of_file(mp3.to_str().unwrap()));
     assert_ne!(a.sha256, sha256_of_file(a.wav.to_str().unwrap()));
 }
 
 #[test]
 fn m4a_without_tags_has_none() {
-    let s = tmp::normalised("samples/three-note-signature.m4a");
+    let path = tmp::click_file("m4a", 12.0, 120.0);
+    let s = tmp::normalised(path.to_str().unwrap());
+    assert_eq!(s.title, None);
+    assert_eq!(s.artist, None);
+    assert_eq!(s.sha256, sha256_of_file(path.to_str().unwrap()));
+}
+
+#[test]
+fn the_signature_m4a_has_no_tags_and_a_known_hash() {
+    // About one particular file: the pinned hash only means something for it.
+    let Some(s) = tmp::sample("samples/three-note-signature.m4a") else { return };
     assert_eq!(s.title, None);
     assert_eq!(s.artist, None);
     assert_eq!(s.sha256, "14a2aeaf2cb59d4836e69bef8de4e45a9da2ee737be999f912ad9013ed4a752a");
@@ -140,7 +156,7 @@ fn m4a_without_tags_has_none() {
 
 #[test]
 fn missing_ffmpeg_is_a_clear_error() {
-    let msg = normalise_with_ffmpeg(Path::new("samples/track.mp3"), &tmpdir(), "ffmpeg-does-not-exist")
+    let msg = normalise_with_ffmpeg(&tmp::click_file("mp3", 30.0, 120.0), &tmpdir(), "ffmpeg-does-not-exist")
         .unwrap_err()
         .to_string();
     // Not `contains("ffmpeg")`: the program name we passed already satisfies that.
