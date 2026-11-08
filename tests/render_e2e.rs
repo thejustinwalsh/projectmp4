@@ -626,7 +626,7 @@ fn dump_plan_cli_writes_a_plan_and_renders_nothing() {
     // Run in the temp dir: a render would drop <stem>.mp4 into the working directory.
     let o = Command::new(env!("CARGO_BIN_EXE_projectmp4"))
         .current_dir(&tmp.0)
-        .args(["render", &input, "--watermark-style", "sigil", "--static-overlay", "--fast", "--no-flash-guard", "--flash-rate", "0.3", "--title", "T", "--dump-plan"])
+        .args(["render", &input, "--watermark-style", "sigil", "--static-overlay", "--fast", "--flash-guard", "--flash-rate", "0.3", "--title", "T", "--dump-plan"])
         .arg(&path)
         .output()
         .unwrap();
@@ -641,7 +641,8 @@ fn dump_plan_cli_writes_a_plan_and_renders_nothing() {
     assert_eq!(dumped.watermark_style, projectmp4::render::MarkStyle::Sigil);
     assert!(dumped.static_overlay);
     assert!(dumped.fast);
-    assert!(!dumped.flash_guard);
+    // --flash-guard turns it on against a default of off.
+    assert!(dumped.flash_guard);
     assert_eq!(dumped.flash_rate, 0.3);
     assert_eq!(dumped.title, "T");
     assert_eq!(dumped.packs_revision.as_deref(), Some(pinned_cotc_commit().as_str()));
@@ -650,15 +651,15 @@ fn dump_plan_cli_writes_a_plan_and_renders_nothing() {
     a.watermark_style = projectmp4::render::MarkStyle::Sigil;
     a.static_overlay = true;
     a.fast = true;
-    a.flash_guard = false;
+    a.flash_guard = true;
     a.flash_rate = 0.3;
     a.title = Some("T".into());
     assert_eq!(dumped, render_plan(&a).unwrap());
     // The default is the wordmark: nothing selects the sigil unless asked.
     assert_eq!(render_plan(&RenderArgs::new(&input)).unwrap().watermark_style, projectmp4::render::MarkStyle::Word);
-    // The guard is on, at the measured limit, unless switched off.
+    // The guard is off unless asked for, and carries the measured limit when it is.
     let d = render_plan(&RenderArgs::new(&input)).unwrap();
-    assert!(d.flash_guard && d.flash_rate == 0.48, "{} {}", d.flash_guard, d.flash_rate);
+    assert!(!d.flash_guard && d.flash_rate == 0.48, "{} {}", d.flash_guard, d.flash_rate);
 }
 
 #[test]

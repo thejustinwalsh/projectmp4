@@ -83,12 +83,15 @@ struct PlanCmd {
     /// Watermark does not pulse with the bass.
     #[arg(long)]
     static_overlay: bool,
-    /// Do not limit frame-to-frame luminance change. The limiter keeps the
-    /// output under the WCAG 2.3.1 photosensitive-seizure flash threshold.
+    /// Limit frame-to-frame luminance change, keeping the output under the
+    /// WCAG 2.3.1 photosensitive-seizure flash threshold. Off by default: these
+    /// presets trip it on nearly every frame, and holding back that much of
+    /// each frame reads as muddy and flattens the response to the beat. Turn it
+    /// on for anything a photosensitive viewer will watch.
     #[arg(long)]
-    no_flash_guard: bool,
+    flash_guard: bool,
     /// Most relative luminance (fraction of maximum) any region may travel per
-    /// second under the flash guard, below 0.54 (0.60 is the exact WCAG threshold). Flashes per second are bounded
+    /// second under `--flash-guard`, below 0.54 (0.60 is the exact WCAG threshold). Flashes per second are bounded
     /// by rate / 0.20 at every fps; the 0.48 default gives 2.4.
     #[arg(long, default_value_t = crate::render::flash::DEFAULT_RATE, value_parser = parse_flash_rate)]
     flash_rate: f32,
@@ -108,7 +111,7 @@ impl PlanCmd {
         a.art = self.art;
         a.watermark_style = self.watermark_style;
         a.static_overlay = self.static_overlay;
-        a.flash_guard = !self.no_flash_guard;
+        a.flash_guard = self.flash_guard;
         a.flash_rate = self.flash_rate;
         a
     }

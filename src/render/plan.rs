@@ -19,6 +19,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const WIDTH: u32 = 1920;
 pub const HEIGHT: u32 = 1080;
+
+/// Overscan: projectM draws this much larger than the frame we keep, and the
+/// centre `WIDTH x HEIGHT` is cropped out of it.
+///
+/// MilkDrop presets leave junk in the outermost rows and columns — the
+/// per-pixel warp mesh samples outside the previous frame's texture at the
+/// clip edge, and border and wave primitives are drawn right up against it, so
+/// the edge either smears or shows a hard seam. There is nothing to fix inside
+/// a preset: it is what the engine does at the boundary. Drawing 5% wider and
+/// taller and throwing the margin away puts that boundary off-frame.
+///
+/// 21/20 of 1920x1080 is 2016x1134, both even, so the crop margin is a whole
+/// 48 columns and 27 rows on each side. The cost is the 10% more pixels
+/// projectM shades.
+pub const RENDER_WIDTH: u32 = WIDTH * 21 / 20;
+pub const RENDER_HEIGHT: u32 = HEIGHT * 21 / 20;
 pub const DEFAULT_PROFILE: &str = "deathstep";
 /// Seconds between ordinary preset changes, and between a drop's hard cuts.
 pub const MIN_GAP: f64 = 8.0;
@@ -52,7 +68,11 @@ pub struct RenderArgs {
     pub fast: bool,
     /// Size goal for the output; resolved to a bitrate before rendering starts.
     pub target: Target,
-    /// Limit frame-to-frame luminance change (WCAG 2.3.1). On unless disabled.
+    /// Limit frame-to-frame luminance change (WCAG 2.3.1). Off unless asked
+    /// for: at the rates these presets reach, the guard blends nearly every
+    /// frame with its predecessor (measured: engaged on 97% of frames, holding
+    /// 99% of the previous frame on the hardest one), which reads as muddy and
+    /// flattens the response to the beat.
     pub flash_guard: bool,
     /// Most relative luminance any region may travel per second under the guard.
     pub flash_rate: f32,
@@ -84,7 +104,7 @@ impl RenderArgs {
             static_overlay: false,
             fast: false,
             target: Target::None,
-            flash_guard: true,
+            flash_guard: false,
             flash_rate: crate::render::flash::DEFAULT_RATE,
             out: None,
             models: PathBuf::from(DEFAULT_MODELS),

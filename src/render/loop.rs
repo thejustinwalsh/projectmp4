@@ -1,6 +1,6 @@
 //! The frame loop: audio window -> projectM -> readback -> flip -> overlay -> ffmpeg.
 
-use super::plan::{prepare, Prepared, RenderArgs, RenderPlan, HEIGHT, WIDTH};
+use super::plan::{prepare, Prepared, RenderArgs, RenderPlan, HEIGHT, RENDER_HEIGHT, RENDER_WIDTH, WIDTH};
 use crate::audio::timeline::{low_band_envelope, Cut, HOP};
 use crate::audio::Driver;
 use crate::encode::Encoder;
@@ -108,12 +108,22 @@ fn is_black(rgba: &[u8]) -> bool {
     rgba.chunks_exact(4).all(|p| p[0] <= BLACK_LEVEL && p[1] <= BLACK_LEVEL && p[2] <= BLACK_LEVEL)
 }
 
-/// `glReadPixels` is bottom-up; the video is top-down.
-fn flip_rows(px: &mut [u8], w: usize, h: usize) {
+/// Copies the centre `w x h` window of a `sw x sh` RGBA readback into `dst`,
+/// turning it top-down on the way: `glReadPixels` hands back rows bottom-up and
+/// the video wants them top-down, so destination row `y` comes from source row
+/// `sh - 1 - (y + oy)`.
+///
+/// The crop is the overscan margin (`RENDER_WIDTH`/`RENDER_HEIGHT` against
+/// `WIDTH`/`HEIGHT`) — the edge where MilkDrop's warp mesh and border
+/// primitives leave artifacts. Centring it keeps the composition put.
+fn crop_flip(src: &[u8], dst: &mut [u8], sw: usize, sh: usize, w: usize, h: usize) {
+    debug_assert!(sw >= w && sh >= h, "{sw}x{sh} cannot contain {w}x{h}");
+    let (ox, oy) = ((sw - w) / 2, (sh - h) / 2);
     let row = w * 4;
-    for y in 0..h / 2 {
-        let (top, bottom) = px.split_at_mut((h - 1 - y) * row);
-        top[y * row..(y + 1) * row].swap_with_slice(&mut bottom[..row]);
+    for y in 0..h {
+        let sy = sh - 1 - (y + oy);
+        let s = (sy * sw + ox) * 4;
+        dst[y * row..(y + 1) * row].copy_from_slice(&src[s..s + row]);
     }
 }
 
@@ -281,9 +291,10 @@ fn run(args: &RenderArgs, prep: &Prepared) -> Result<RenderReport> {
     let bass = bass_per_frame(&prep.driver, fps, plan.total_frames);
 
     // `Instance` borrows the context, so the two are separate locals.
-    let gl = GlContext::new(WIDTH, HEIGHT)?;
+    // projectM draws the overscanned size; only the centre reaches the encoder.
+    let gl = GlContext::new(RENDER_WIDTH, RENDER_HEIGHT)?;
     let pm = gl.create_instance()?;
-    pm.set_window_size(WIDTH, HEIGHT);
+    pm.set_window_size(RENDER_WIDTH, RENDER_HEIGHT);
     pm.set_mesh_size(MESH.0, MESH.1);
     pm.set_fps(fps as i32);
     if let Some(t) = &plan.textures {
@@ -312,9 +323,13 @@ fn run(args: &RenderArgs, prep: &Prepared) -> Result<RenderReport> {
 
     let rate = prep.driver.rate as f64;
     let (w, h) = (WIDTH as usize, HEIGHT as usize);
+    let (rw, rh) = (RENDER_WIDTH as usize, RENDER_HEIGHT as usize);
     let mut watch = BlackWatch::new(fps);
     let mut frames_written = 0u64;
-    // One frame buffer for the whole render; `glReadPixels` overwrites all of it.
+    // Two buffers for the whole render: the overscanned readback, and the
+    // cropped top-down frame. `glReadPixels` overwrites all of `raw`, and
+    // `crop_flip` overwrites all of `px`.
+    let mut raw = vec![0u8; rw * rh * 4];
     let mut px = vec![0u8; w * h * 4];
     let mut guard = plan.flash_guard.then(|| FlashGuard::new(w, h, fps, plan.flash_rate));
     for n in 0..plan.total_frames {
@@ -339,7 +354,9 @@ fn run(args: &RenderArgs, prep: &Prepared) -> Result<RenderReport> {
             n,
             || {
                 pm.render_frame_fbo(gl.fbo());
-                gl.read_rgba_into(&mut px)?;
+                gl.read_rgba_into(&mut raw)?;
+                // Judge the frame that will be seen, not the margin thrown away.
+                crop_flip(&raw, &mut px, rw, rh, w, h);
                 Ok(((), is_black(&px)))
             },
             || {
@@ -350,7 +367,6 @@ fn run(args: &RenderArgs, prep: &Prepared) -> Result<RenderReport> {
             },
         )?;
 
-        flip_rows(&mut px, w, h);
         // Before the overlay: the title, art and watermark are brand surface and stay undimmed.
         if let Some(g) = guard.as_mut() {
             g.limit(&mut px);
@@ -390,27 +406,55 @@ fn run(args: &RenderArgs, prep: &Prepared) -> Result<RenderReport> {
 mod tests {
     use super::*;
 
+    /// A `sw x sh` RGBA buffer whose every pixel encodes its own (x, y).
+    fn coded(sw: usize, sh: usize) -> Vec<u8> {
+        let mut v = vec![0u8; sw * sh * 4];
+        for y in 0..sh {
+            for x in 0..sw {
+                let p = (y * sw + x) * 4;
+                v[p..p + 4].copy_from_slice(&[x as u8, y as u8, 0, 255]);
+            }
+        }
+        v
+    }
+
     #[test]
-    fn flip_rows_handles_even_and_odd_heights() {
+    fn crop_flip_with_no_margin_is_a_vertical_flip() {
         for (w, h) in [(3usize, 3usize), (3, 4), (2, 2), (1, 1), (4, 6)] {
-            let mut px: Vec<u8> = (0..w * h * 4).map(|i| (i % 251) as u8).collect();
-            let orig = px.clone();
-            flip_rows(&mut px, w, h);
+            let src = coded(w, h);
+            let mut dst = vec![0u8; w * h * 4];
+            crop_flip(&src, &mut dst, w, h, w, h);
             for y in 0..h {
-                assert_eq!(px[y * w * 4..(y + 1) * w * 4], orig[(h - 1 - y) * w * 4..(h - y) * w * 4], "{w}x{h} row {y}");
+                assert_eq!(dst[y * w * 4..(y + 1) * w * 4], src[(h - 1 - y) * w * 4..(h - y) * w * 4], "{w}x{h} row {y}");
             }
         }
     }
 
     #[test]
-    fn flip_rows_reverses_row_order_and_keeps_pixels_intact() {
-        let (w, h) = (3, 3);
-        let mut px: Vec<u8> = (0..(w * h * 4) as u8).collect();
-        let orig = px.clone();
-        flip_rows(&mut px, w, h);
+    fn crop_flip_takes_the_centre_and_drops_the_margin() {
+        // 7x5 down to 3x3: margin 2 columns and 1 row on every side. Destination
+        // (0,0) is the top-left of the kept window, which in a bottom-up source
+        // is x = 2, y = 3 (sh - 1 - oy).
+        let (sw, sh, w, h) = (7usize, 5usize, 3usize, 3usize);
+        let src = coded(sw, sh);
+        let mut dst = vec![0u8; w * h * 4];
+        crop_flip(&src, &mut dst, sw, sh, w, h);
         for y in 0..h {
-            assert_eq!(px[y * w * 4..(y + 1) * w * 4], orig[(h - 1 - y) * w * 4..(h - y) * w * 4]);
+            for x in 0..w {
+                let p = (y * w + x) * 4;
+                assert_eq!((dst[p], dst[p + 1]), ((x + 2) as u8, (sh - 1 - (y + 1)) as u8), "dst ({x},{y})");
+            }
         }
+    }
+
+    #[test]
+    fn the_overscan_margin_is_a_whole_number_of_pixels_on_every_side() {
+        use super::super::plan::{RENDER_HEIGHT, RENDER_WIDTH};
+        assert_eq!((RENDER_WIDTH, RENDER_HEIGHT), (2016, 1134));
+        // Even margins on both axes, so the kept window is exactly centred.
+        assert_eq!((RENDER_WIDTH - WIDTH) % 2, 0);
+        assert_eq!((RENDER_HEIGHT - HEIGHT) % 2, 0);
+        assert_eq!(((RENDER_WIDTH - WIDTH) / 2, (RENDER_HEIGHT - HEIGHT) / 2), (48, 27));
     }
 
     // --- BlackWatch: the rule that decides a preset is dead, pinned with exact windows ---
