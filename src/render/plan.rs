@@ -502,7 +502,9 @@ fn resolve_pool(args: &RenderArgs) -> Result<(Vec<PathBuf>, Option<PathBuf>)> {
     if profile.presets.is_empty() {
         return Err(Error::msg(format!("profile {:?} lists no presets", profile.name)));
     }
-    let pool = profile.presets.iter().map(|p| packs.cotc.join(p)).collect();
+    // Pack-cache-relative, so a profile can mix the curated sets with Cream of the Crop.
+    let root = packs.cache_dir()?.to_path_buf();
+    let pool = profile.presets.iter().map(|p| root.join(p)).collect();
     Ok((pool, Some(packs.textures)))
 }
 

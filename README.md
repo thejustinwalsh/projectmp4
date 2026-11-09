@@ -39,6 +39,13 @@ first needs it, so nothing has to be run by hand:
 | `htdemucs-q8_0.gguf` | 62 MB | first `--clip drop` / `--clip intro` | separating stems to find a section |
 | community preset packs | 200 MB | `cargo run --release -- init` | the preset lists in `presets/profiles.toml` |
 
+Presets are chosen by curation, not by a heuristic. The pool is BLTC 2.01 and
+the Winamp stock set -- the two community best-of compilations of the MilkDrop
+canon -- and a preset's bass reactivity only orders it against others in the
+same tier. Cream of the Crop fills a profile the curations cannot, inside that
+genre's categories. Variants of one preset (`nz`, `roam`, `ret`) collapse to one
+entry, so forty slots are forty different things to watch.
+
 `scripts/fetch-models.sh` is what does the first two, and it takes a group
 (`beat`, `stems`, or neither for both) so each stage asks only for what it
 needs. Running it yourself just does that work earlier. It is idempotent: a
@@ -153,7 +160,7 @@ than skip** by default, on purpose: they are the only evidence that this
 project's stems and section boundaries match the implementation they were
 ported from, so they must never pass quietly when they did not run.
 
-The second covers the community-ranked preset manifest and the per-genre
+The second covers the curated preset manifest and the per-genre
 selection profiles: eight tests marked `#[ignore]` because they clone a
 preset-pack repository over the network. They are the only coverage the
 preset-selection pipeline has, including the only check that

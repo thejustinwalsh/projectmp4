@@ -182,6 +182,7 @@ fn cand(name: &str) -> projectmp4::presets::rank::Candidate {
     projectmp4::presets::rank::Candidate {
         path: PathBuf::from(name),
         score: projectmp4::presets::rank::Score { bass: 0, react: 1, shader: true },
+        tier: projectmp4::presets::rank::Tier::Uncurated,
         rank_score: 0,
     }
 }

@@ -280,16 +280,28 @@ fn genre(profile: &str) -> Option<Genre> {
 /// Bass score above which a preset is too kick-driven for the ambient profile.
 const AMBIENT_BASS_CAP: u32 = 9;
 
-/// Bonus for also appearing in the BLTC best-of (a second human curation pass).
-const TIER_BLTC: i64 = 100;
-/// Bonus for also appearing in the Winamp stock set.
-const TIER_STOCK: i64 = 40;
+/// How a human rated this preset, which is the primary sort key.
+///
+/// The arithmetic below can only order presets *within* a tier. A preset that a
+/// person put in a best-of outranks any amount of it: BLTC 2.01 and the Winamp
+/// stock set are the two surviving community curations of the MilkDrop canon,
+/// and they are what "the best presets" means here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Tier {
+    /// In neither curated set: eligible only to fill a profile the curated sets cannot.
+    Uncurated,
+    /// In the Winamp stock set shipped with MilkDrop (the Geiss/Rovastar pick).
+    Stock,
+    /// In BLTC 2.01, the community best-of.
+    Bltc,
+}
 
 #[derive(Debug, Clone)]
 pub struct Candidate {
     pub path: PathBuf,
     pub score: Score,
-    /// Genre-weighted bass score plus tier bonuses; what `rank` sorts by.
+    pub tier: Tier,
+    /// Genre-weighted bass score. Orders presets inside a tier, never across tiers.
     pub rank_score: i64,
 }
 
@@ -321,9 +333,9 @@ fn score_file(p: &Path) -> Option<Score> {
     Some(score_bytes(&std::fs::read(p).ok()?))
 }
 
-/// Every shader preset in the profile's categories that is not blacklisted,
-/// references at least one audio variable and is within the genre's bass cap,
-/// best first (ties broken by path so the order is deterministic).
+/// Every preset a human curated, plus the profile's Cream of the Crop categories
+/// behind them, that is not blacklisted, references at least one audio variable
+/// and is within the genre's bass cap. Best first, one per variant family.
 pub fn eligible(packs: &Packs, profile: &str) -> Result<Vec<Candidate>> {
     let g = genre(profile).ok_or_else(|| {
         Error::msg(format!("unknown profile {profile:?}; expected one of {}", PROFILES.join(", ")))
@@ -331,10 +343,16 @@ pub fn eligible(packs: &Packs, profile: &str) -> Result<Vec<Candidate>> {
     let bl = blacklist();
     let bltc = name_set(&packs.bltc());
     let stock = name_set(&packs.stock());
+
+    // The curated sets are the pool. Cream of the Crop follows them, in the
+    // genre's categories, and only ever fills slots the curations cannot.
     let mut files = Vec::new();
+    walk_milk(&packs.bltc(), &mut files);
+    walk_milk(&packs.stock(), &mut files);
     for cat in g.cats {
         walk_milk(&packs.cotc.join(cat), &mut files);
     }
+
     let mut out: Vec<Candidate> = files
         .into_iter()
         .filter_map(|path| {
@@ -343,9 +361,6 @@ pub fn eligible(packs: &Packs, profile: &str) -> Result<Vec<Candidate>> {
                 return None;
             }
             let score = score_file(&path)?;
-            if !score.shader {
-                return None;
-            }
             // A preset that reads no audio variable at all does not respond to the
             // music, whatever its weights say; it is a screensaver, not a candidate.
             if score.react == 0 {
@@ -355,18 +370,49 @@ pub fn eligible(packs: &Packs, profile: &str) -> Result<Vec<Candidate>> {
                 return None;
             }
             let key = norm(name);
-            let mut rank_score = g.bass_w * i64::from(score.bass) + g.other_w * (i64::from(score.react) - i64::from(score.bass));
-            if bltc.contains(&key) {
-                rank_score += TIER_BLTC;
-            }
-            if stock.contains(&key) {
-                rank_score += TIER_STOCK;
-            }
-            Some(Candidate { path, score, rank_score })
+            let tier = if bltc.contains(&key) {
+                Tier::Bltc
+            } else if stock.contains(&key) {
+                Tier::Stock
+            } else {
+                Tier::Uncurated
+            };
+            let rank_score = g.bass_w * i64::from(score.bass) + g.other_w * (i64::from(score.react) - i64::from(score.bass));
+            Some(Candidate { path, score, tier, rank_score })
         })
         .collect();
-    out.sort_by(|a, b| b.rank_score.cmp(&a.rank_score).then_with(|| a.path.cmp(&b.path)));
+    // Curation first, reactivity second, path last so the order is deterministic.
+    out.sort_by(|a, b| {
+        b.tier.cmp(&a.tier).then_with(|| b.rank_score.cmp(&a.rank_score)).then_with(|| a.path.cmp(&b.path))
+    });
+    dedup_variants(&mut out);
     Ok(out)
+}
+
+/// Suffixes the packs use to mark a re-mix of the same preset. Two files whose
+/// names differ only by these are the same look, so they must not take two of
+/// the forty slots.
+const VARIANT_SUFFIXES: [&str; 5] = [" nz", " roam", " roam3", " ret", " flacc roams"];
+
+/// The name a preset shares with its own variants.
+fn variant_key(name: &str) -> String {
+    let mut k = norm(name);
+    loop {
+        match VARIANT_SUFFIXES.iter().find_map(|s| k.strip_suffix(s)) {
+            Some(shorter) => k = shorter.trim_end().to_string(),
+            None => return k,
+        }
+    }
+}
+
+/// Keeps the best-ranked member of each variant family, in place. `cands` must
+/// already be best-first; the first of a family seen is the one kept.
+fn dedup_variants(cands: &mut Vec<Candidate>) {
+    let mut seen = HashSet::new();
+    cands.retain(|c| match c.path.file_name().and_then(|n| n.to_str()) {
+        Some(n) => seen.insert(variant_key(n)),
+        None => false,
+    });
 }
 
 /// Walk `cands` (already best-first) and keep the first `n` whose `score` passes `ceiling`,

@@ -206,6 +206,15 @@ CotC/Hypnotic top hits       shadowharlequin+flexi, Goody+flexi, suksma, Zylot
 
 ### 5.5 The shipped selection rule
 
+> **Superseded 2026-11-08.** The rule below shipped and was wrong in practice.
+> Ranking by bass-reference count put zero BLTC and zero stock presets in the
+> forty, because the shader-only pool excludes 389 of BLTC's 413 and all 557
+> stock presets (both sets are MilkDrop 1.x, which predates pixel shaders), and
+> a +100 bonus cannot reach scores that run to 512. The curated sets are now the
+> pool and the arithmetic only orders presets inside a tier; the shader gate is
+> gone. See `eligible` in `src/presets/rank.rs`. Kept here because it is the
+> argument the implementation was built from.
+
 ```
 candidate pool  = Cream of the Crop, shader presets only
                   ∩ category whitelist for the genre profile

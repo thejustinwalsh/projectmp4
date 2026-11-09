@@ -1,7 +1,7 @@
 //! Tests that need the fetched packs are `#[ignore]`d (network on a cold cache).
 //! Run them with `cargo test --test rank -- --ignored`.
 
-use projectmp4::presets::rank::{eligible, score_bytes};
+use projectmp4::presets::rank::{eligible, score_bytes, Tier};
 use projectmp4::presets::{rank, score_milk, Manifest};
 use projectmp4::Packs;
 use std::collections::HashMap;
@@ -66,30 +66,60 @@ fn scoring_matches_the_python_prototype() {
 
 #[test]
 #[ignore = "needs the Cream of the Crop pack (network on a cold cache)"]
-fn profiles_are_shader_only_ranked_and_sized() {
+fn profiles_are_curated_ranked_and_sized() {
     let packs = packs();
     let pool = eligible(&packs, "deathstep").unwrap();
     assert!(pool.len() > 400, "pool suspiciously small: {}", pool.len());
     let p = rank(&packs, "deathstep", 40).unwrap();
     assert_eq!(p.presets.len(), 40);
-    assert!(p.presets.iter().all(|f| score_bytes(&fs::read(f).unwrap()).shader));
 
-    // Ranked, not arbitrary: non-increasing by the ranking score, and the head beats the pool median.
+    // The point of the ranking: what a human put in a best-of wins. The shipped
+    // forty must come from the curated sets, not from the arithmetic.
     let by_path: HashMap<_, _> = pool.iter().map(|c| (c.path.clone(), c)).collect();
+    let uncurated: Vec<_> =
+        p.presets.iter().filter(|f| by_path[*f].tier == Tier::Uncurated).collect();
+    assert!(uncurated.is_empty(), "uncurated presets took curated slots: {uncurated:?}");
+
+    // Curation is the primary key, so the tiers must come out in blocks: once the
+    // list drops to a lower tier it can never climb back.
+    let tiers: Vec<Tier> = p.presets.iter().map(|f| by_path[f].tier).collect();
+    assert!(tiers.windows(2).all(|w| w[0] >= w[1]), "tiers are not in blocks: {tiers:?}");
+
+    // One slot per look: the packs ship `nz` / `roam` / `ret` remixes of the same
+    // preset under different file names, and forty slots must be forty different
+    // things to watch. The suffixes are stripped here rather than by calling the
+    // library's own helper, so this is a check and not a restatement.
+    let family = |f: &PathBuf| {
+        let mut n = f.file_name().unwrap().to_str().unwrap().to_lowercase();
+        n = n.trim_end_matches(".milk").to_string();
+        loop {
+            let t = n.trim_end().trim_end_matches(['+', ']', ')']).trim_end();
+            match [" nz", " roam3", " roam", " ret", " flacc,roams", " - 1-ret"]
+                .iter()
+                .find_map(|s| t.strip_suffix(s))
+            {
+                Some(shorter) => n = shorter.to_string(),
+                None => return t.to_string(),
+            }
+        }
+    };
+    let mut fams: Vec<String> = p.presets.iter().map(family).collect();
+    fams.sort();
+    fams.dedup();
+    assert_eq!(fams.len(), 40, "the profile ships two variants of the same preset");
+
+    // Ranked within the tier, not arbitrary: non-increasing by the ranking score.
     let scores: Vec<i64> = p.presets.iter().map(|f| by_path[f].rank_score).collect();
     assert!(scores.windows(2).all(|w| w[0] >= w[1]), "not in score order: {scores:?}");
-    let mut all: Vec<i64> = pool.iter().map(|c| c.rank_score).collect();
-    all.sort();
-    let median = all[all.len() / 2];
-    assert!(scores[0] > median, "top {} does not beat pool median {median}", scores[0]);
 
-    // Independent of the ranking formula: deathstep is about bass, so the selection must be
-    // far more bass-reactive than a typical eligible preset.
-    let mut bass: Vec<u32> = pool.iter().map(|c| c.score.bass).collect();
+    // Independent of the ranking formula: deathstep is about bass, so the selection
+    // must be more bass-reactive than a typical preset of the tier it comes from.
+    let mut bass: Vec<u32> =
+        pool.iter().filter(|c| c.tier != Tier::Uncurated).map(|c| c.score.bass).collect();
     bass.sort();
     let med_bass = bass[bass.len() / 2];
     let min_sel = p.presets.iter().map(|f| by_path[f].score.bass).min().unwrap();
-    assert!(min_sel > med_bass, "weakest pick bass={min_sel} <= pool median bass={med_bass}");
+    assert!(min_sel >= med_bass, "weakest pick bass={min_sel} < curated median bass={med_bass}");
 }
 
 #[test]
@@ -103,13 +133,16 @@ fn dubstep_aliases_deathstep() {
 
 #[test]
 #[ignore = "needs the Cream of the Crop pack (network on a cold cache)"]
-fn genres_differ_and_stay_in_their_categories() {
+fn genres_differ_and_fill_only_from_their_categories() {
     let packs = packs();
+    // A profile is curated presets first; Cream of the Crop only fills what the
+    // curations cannot, and that fill is still confined to the genre's categories.
     let cats = |name: &str, allowed: &[&str]| {
         let p = rank(&packs, name, 40).unwrap();
         assert_eq!(p.presets.len(), 40, "{name}");
         for f in &p.presets {
-            let cat = f.strip_prefix(&packs.cotc).unwrap().components().next().unwrap().as_os_str().to_str().unwrap().to_string();
+            let Ok(rel) = f.strip_prefix(&packs.cotc) else { continue };
+            let cat = rel.components().next().unwrap().as_os_str().to_str().unwrap().to_string();
             assert!(allowed.contains(&cat.as_str()), "{name}: {} is in {cat}", f.display());
         }
         p.presets
