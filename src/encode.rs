@@ -16,7 +16,7 @@ const STDERR_TAIL: usize = 8 * 1024;
 /// Where the output is going, which decides how many bytes it may cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Target {
-    /// No size goal: constant quality (CRF 17).
+    /// No size goal: the default encode, capped CRF under `CRF_KBPS`.
     #[default]
     None,
     /// Discord Nitro: 500 MB.
@@ -53,12 +53,28 @@ impl Target {
 const MARGIN: f64 = 0.92;
 /// Below this, 1080p60 of this content falls apart.
 const FLOOR_KBPS: f64 = 6000.0;
-/// Measured CRF 17 average on a real full track (16.03 Mb/s).
-pub const CRF_KBPS: f64 = 16030.0;
-/// Budgets above this: CRF is cheaper than the cap, so keep CRF. Derived from
-/// `CRF_KBPS`: 16030 * 1.25 = 20037.5, rounded to 20000. That is CRF's measured
-/// cost plus 25% headroom for content costlier than the one measured.
-const CAP_CRF_AT: f64 = 20000.0;
+/// Quality target for the default encode. The ceiling below is what bounds the
+/// file; this decides how good the stretches cheap enough to fit under it look.
+pub const DEFAULT_CRF: u32 = 20;
+/// Hard ceiling on the default encode's video bitrate, and therefore on its
+/// size: `CRF_KBPS / 8 * duration_s` bytes is the most it can produce.
+///
+/// Quality alone cannot size this content. Measured on 20 s of a real render at
+/// 1080p60: CRF 17 spends 67.8 Mb/s and CRF 20 spends 48.4 Mb/s, so reaching
+/// 12 Mb/s on the quality knob would take about CRF 32, which looks like CRF
+/// 32. A full-frame MilkDrop preset is high-entropy in every tile of every
+/// frame and offers CRF no cheap scenes to save on, so the ceiling does the
+/// work and CRF only shapes what happens below it. 12 Mb/s is also what
+/// YouTube asks for at 1080p60.
+///
+/// Being enforced rather than measured is what makes the sizing below sound:
+/// the old value was an average of one track, and a render of busier content
+/// simply exceeded it.
+pub const CRF_KBPS: f64 = 12000.0;
+/// Budgets above this keep the default encode, because it cannot exceed
+/// `CRF_KBPS` and so already fits. `CRF_KBPS * 1.25`: the 25% is headroom for
+/// the muxer and for VBR drift around the ceiling.
+const CAP_CRF_AT: f64 = 15000.0;
 /// X's free-account duration limit.
 pub const X_MAX_SECONDS: f64 = 140.0;
 /// The mp4 audio bitrate `ffmpeg_args` asks for.
@@ -99,12 +115,14 @@ fn budget_kbps(target: Target, duration_s: f64, audio_kbps: u32) -> Result<Optio
 }
 
 /// The video bitrate (kbps) that makes `duration_s` of **libx264** output fit
-/// `target`. `Ok(None)`: use CRF 17. `Ok(Some(k))`: cap at k kbps. `Err`:
-/// impossible.
+/// `target`. `Ok(None)`: use the default encode. `Ok(Some(k))`: cap at k kbps.
+/// `Err`: impossible.
 ///
-/// Use [`video_bitrate_kbps_fast`] for the `--fast` encoder: the `Ok(None)`
-/// here means "CRF 17 already fits", which rests on `CRF_KBPS`, a measurement
-/// of libx264 and of nothing else.
+/// `Ok(None)` means "the default already fits", and it is sound because the
+/// default cannot exceed `CRF_KBPS` — it is a maxrate, not an estimate. Use
+/// [`video_bitrate_kbps_fast`] for `--fast` anyway: it can afford the whole
+/// budget where libx264 would stop at the ceiling, and spending it is free
+/// quality.
 pub fn video_bitrate_kbps(target: Target, duration_s: f64, audio_kbps: u32) -> Result<Option<u32>> {
     let Some(budget) = budget_kbps(target, duration_s, audio_kbps)? else {
         return Ok(None);
@@ -113,24 +131,24 @@ pub fn video_bitrate_kbps(target: Target, duration_s: f64, audio_kbps: u32) -> R
         return Ok(None);
     }
     // Down, never up: rounding up spends margin we do not have.
-    // Never ask for more than CRF 17 would spend: between the CRF cost and
-    // CAP_CRF_AT a cap at the full budget would inflate the file.
+    // Never ask for more than the default encode can produce: between CRF_KBPS
+    // and CAP_CRF_AT a cap at the full budget would inflate the file.
     Ok(Some(budget.min(CRF_KBPS).floor() as u32))
 }
 
 /// The video bitrate (kbps) for the `--fast` encoder, h264_videotoolbox.
 ///
-/// Unlike [`video_bitrate_kbps`] this never answers "constant quality fits".
-/// Constant quality on VideoToolbox is `-q:v 65`, whose cost is not `CRF_KBPS`
-/// and is not bounded by anything we have measured: on a real 1080p60 track it
-/// came out at 109 Mb/s, 6.8x libx264's CRF 17. Taking the `CAP_CRF_AT`
-/// shortcut on this encoder produced a 2.4 GB file for `--target discord`,
-/// which caps at 500 MB. So a capped target always gets an explicit bitrate
-/// here, and only an uncapped one (`none`, `youtube`) gets constant quality.
+/// Unlike [`video_bitrate_kbps`] this hands back a bitrate for every capped
+/// target rather than ever answering "the default fits". VideoToolbox has no
+/// CRF: its old default, `-q:v 65`, was bounded by nothing and measured
+/// 109 Mb/s on a real 1080p60 track, which wrote a 2.4 GB file against
+/// `--target discord`'s 500 MB cap. Its default is now the same ceiling stated
+/// as an average bitrate, so that hole is closed twice over.
 ///
-/// The budget is not clamped to `CRF_KBPS` either, for the same reason: that
-/// clamp asks for no more than libx264 would have spent, which says nothing
-/// about this encoder and would only give away cap headroom.
+/// The budget is not clamped to `CRF_KBPS` here. On libx264 that clamp stops a
+/// cap from asking for more than the encoder would produce; this encoder is
+/// told what to produce, so clamping would only give away cap headroom and the
+/// quality that comes with it.
 pub fn video_bitrate_kbps_fast(target: Target, duration_s: f64, audio_kbps: u32) -> Result<Option<u32>> {
     Ok(budget_kbps(target, duration_s, audio_kbps)?.map(|b| b.floor() as u32))
 }
@@ -181,10 +199,25 @@ fn sweep_orphaned_parts(out: &Path) {
     }
 }
 
+/// Single-pass VBR at `k` kbps: the average, a 20% peak allowance, and two
+/// seconds of buffer at the peak.
+fn bitrate_args(k: u64) -> [String; 6] {
+    [
+        "-b:v".to_string(),
+        format!("{k}k"),
+        "-maxrate".to_string(),
+        format!("{}k", k * 12 / 10),
+        "-bufsize".to_string(),
+        format!("{}k", k * 24 / 10),
+    ]
+}
+
 /// The ffmpeg argument vector (without the program name).
 ///
-/// `bitrate_kbps` of `Some(k)` replaces constant quality with a single-pass
-/// capped bitrate; `None` is CRF 17 (videotoolbox: `-q:v 65`).
+/// `bitrate_kbps` of `Some(k)` replaces the default rate control with a
+/// single-pass capped bitrate; `None` is the default encode — `-crf
+/// DEFAULT_CRF` under a `CRF_KBPS` maxrate, or on videotoolbox, which has no
+/// CRF, that ceiling as an average bitrate.
 pub fn ffmpeg_args(out: &Path, audio: &Path, w: u32, h: u32, fps: u32, fast: bool, bitrate_kbps: Option<u32>) -> Vec<OsString> {
     let mut a: Vec<OsString> = Vec::new();
     // `-y`: without it, a staging file that already exists makes ffmpeg print
@@ -204,17 +237,7 @@ pub fn ffmpeg_args(out: &Path, audio: &Path, w: u32, h: u32, fps: u32, fast: boo
     for s in ["-map", "0:v", "-map", "1:a"] {
         a.push(s.into());
     }
-    let rate = bitrate_kbps.map(|k| {
-        let k = k as u64;
-        [
-            "-b:v".to_string(),
-            format!("{k}k"),
-            "-maxrate".to_string(),
-            format!("{}k", k * 12 / 10),
-            "-bufsize".to_string(),
-            format!("{}k", k * 24 / 10),
-        ]
-    });
+    let rate = bitrate_kbps.map(|k| bitrate_args(k as u64));
     if fast {
         // h264_videotoolbox accepts neither -crf nor -preset (it ignores them
         // silently); -q:v is its quality control, and it honours a bitrate.
@@ -223,7 +246,12 @@ pub fn ffmpeg_args(out: &Path, audio: &Path, w: u32, h: u32, fps: u32, fast: boo
         }
         match &rate {
             Some(r) => a.extend(r.iter().map(OsString::from)),
-            None => a.extend(["-q:v", "65"].map(OsString::from)),
+            None => {
+                // `-q:v 65` measured 109 Mb/s on this content. VideoToolbox has
+                // no CRF to cap, so its default is the same ceiling stated as a
+                // bitrate, which it does honour.
+                a.extend(bitrate_args(CRF_KBPS as u64).iter().map(OsString::from));
+            }
         }
     } else {
         for s in ["-c:v", "libx264"] {
@@ -231,7 +259,18 @@ pub fn ffmpeg_args(out: &Path, audio: &Path, w: u32, h: u32, fps: u32, fast: boo
         }
         match &rate {
             Some(r) => a.extend(r.iter().map(OsString::from)),
-            None => a.extend(["-crf", "17"].map(OsString::from)),
+            None => {
+                // Capped CRF: quality-driven wherever the content is cheap
+                // enough, hard-bounded where it is not. Uncapped, this encoder
+                // spends 67.8 Mb/s at CRF 17 on a MilkDrop preset, which is
+                // 1.8 GB for a 3:39 track.
+                a.push("-crf".into());
+                a.push(DEFAULT_CRF.to_string().into());
+                a.push("-maxrate".into());
+                a.push(format!("{}k", CRF_KBPS as u64).into());
+                a.push("-bufsize".into());
+                a.push(format!("{}k", CRF_KBPS as u64 * 2).into());
+            }
         }
         for s in ["-preset", "slow"] {
             a.push(s.into());

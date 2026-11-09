@@ -44,6 +44,39 @@ Two further pieces are fetched rather than committed, for the same reason:
   else builds and runs without it, and the tests that need it skip when it is
   absent.
 
+## Output
+
+1080p60 h264 in mp4, AAC at 256 kb/s, `+faststart`.
+
+The default encode is **capped CRF**: CRF 20 under a hard 12 Mb/s ceiling, so a
+3:39 track comes out around 350 MB and the size follows from the duration
+rather than from the content.
+
+The ceiling is not a preference, it is the only thing that works. A full-frame
+MilkDrop preset is high-entropy in every tile of every frame and gives CRF no
+cheap scenes to save on, so quality alone cannot size it. Measured on 20 s at
+1080p60:
+
+| setting | bitrate | a 3:39 track would be |
+| --- | --- | --- |
+| `-crf 17`, uncapped | 67.8 Mb/s | 1.86 GB |
+| `-crf 20`, uncapped | 48.4 Mb/s | 1.33 GB |
+| `-crf 20` under 12 Mb/s | 12.7 Mb/s | 348 MB |
+
+Reaching 12 Mb/s on the CRF knob alone would take about CRF 32, which looks
+like CRF 32. Capping instead costs SSIM 0.879 against the uncapped CRF 17
+reference and leaves the frame-to-frame luminance range unchanged (12.9–209.6
+against 13.0–209.5), so the motion survives; 12 Mb/s is also what YouTube asks
+for at 1080p60. `--fast` (VideoToolbox) has no CRF, so it states the same
+ceiling as an average bitrate.
+
+`--target discord|x|youtube` sizes the output for where it is going. Because
+the default cannot exceed the ceiling, a target only has to intervene when the
+cap is tighter than that — for Discord's 500 MB, past about 241 s — which is
+why a 3:39 track needs no target to fit.
+
+## Testing
+
 ### Test fixtures
 
 The suites build the audio they need, so a clone needs no audio to test

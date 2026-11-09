@@ -1,4 +1,4 @@
-use projectmp4::encode::{ffmpeg_args, Encoder};
+use projectmp4::encode::{ffmpeg_args, Encoder, CRF_KBPS, DEFAULT_CRF};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::os::unix::fs::PermissionsExt;
@@ -153,10 +153,47 @@ fn rate_control_flags_match_the_codec() {
     };
     let has = |a: &[String], f: &str, v: &str| a.windows(2).any(|w| w[0] == f && w[1] == v);
     let (slow, fast) = (args(false), args(true));
-    assert!(has(&slow, "-c:v", "libx264") && has(&slow, "-crf", "17") && has(&slow, "-preset", "slow"));
-    assert!(has(&fast, "-c:v", "h264_videotoolbox") && has(&fast, "-q:v", "65"));
-    // videotoolbox silently ignores these, so passing them would be inert.
+    let ceiling = format!("{}k", CRF_KBPS as u64);
+    assert!(has(&slow, "-c:v", "libx264"), "{slow:?}");
+    assert!(has(&slow, "-crf", &DEFAULT_CRF.to_string()) && has(&slow, "-preset", "slow"), "{slow:?}");
+    // videotoolbox has no CRF, so its default states the same ceiling as a rate.
+    assert!(has(&fast, "-c:v", "h264_videotoolbox") && has(&fast, "-b:v", &ceiling), "{fast:?}");
     assert!(!fast.iter().any(|a| a == "-crf" || a == "-preset"), "{fast:?}");
+    // `-q:v 65` is gone: it measured 109 Mb/s on this content, which is the
+    // defect this replaced, so its return would be a regression.
+    assert!(!fast.iter().any(|a| a == "-q:v"), "{fast:?}");
+}
+
+#[test]
+fn the_default_encode_is_capped_so_the_file_cannot_balloon() {
+    // The bug this pins: CRF 17 with no ceiling spent 67.8 Mb/s on a MilkDrop
+    // preset at 1080p60 — 1.8 GB for a 3:39 track. Quality alone cannot size
+    // this content (CRF 20 still spends 48.4 Mb/s), so the default carries a
+    // hard ceiling on both encoders and the size follows from the duration.
+    let ceiling = format!("{}k", CRF_KBPS as u64);
+    for fast in [false, true] {
+        let a: Vec<String> = ffmpeg_args(Path::new("o.mp4"), Path::new("a.mp3"), 1920, 1080, 60, fast, None)
+            .into_iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        let has = |f: &str, v: &str| a.windows(2).any(|w| w[0] == f && w[1] == v);
+        // The two encoders state the same ceiling in the terms each one has.
+        // libx264 keeps CRF and bounds it with -maxrate; VideoToolbox has no
+        // CRF, so the ceiling is its average -b:v and -maxrate is only the peak
+        // allowance. Either way the bound on size is 12000 kb/s.
+        assert!(
+            if fast { has("-b:v", &ceiling) } else { has("-maxrate", &ceiling) },
+            "no 12000 kb/s ceiling on the default encode (fast={fast}): {a:?}"
+        );
+        assert!(
+            a.windows(2).any(|w| w[0] == "-bufsize"),
+            "a rate ceiling without a bufsize does not bound anything: {a:?}"
+        );
+    }
+    // Compile-time, because this is the invariant and not an observation:
+    // raising the ceiling past 12 Mb/s puts a 3:39 track over 350 MB, and
+    // should take deliberately editing this line rather than a silent pass.
+    const { assert!(CRF_KBPS <= 12_000.0) };
 }
 
 #[test]
@@ -168,7 +205,9 @@ fn bitrate_target_replaces_crf_with_a_capped_single_pass_rate() {
             .collect()
     };
     let has = |a: &[String], f: &str, v: &str| a.windows(2).any(|w| w[0] == f && w[1] == v);
-    // (fast, kbps, expect -b:v/-maxrate/-bufsize, expect -crf 17 / -q:v 65)
+    // A target's explicit rate replaces the quality knob entirely; the default
+    // keeps it, under the ceiling. Either way a bitrate is stated, so the
+    // output size follows from the duration and never from the content.
     for (fast, k) in [(false, Some(12_010)), (true, Some(12_010)), (false, None), (true, None)] {
         let a = args(fast, k);
         match k {
@@ -179,8 +218,15 @@ fn bitrate_target_replaces_crf_with_a_capped_single_pass_rate() {
                 assert!(!a.iter().any(|x| x == "-crf" || x == "-q:v"), "{a:?}");
             }
             None => {
-                assert!(!a.iter().any(|x| x == "-b:v" || x == "-maxrate" || x == "-bufsize"), "{a:?}");
-                assert!(if fast { has(&a, "-q:v", "65") } else { has(&a, "-crf", "17") }, "{a:?}");
+                let c = CRF_KBPS as u64;
+                // No `-b:v` on libx264: CRF decides the rate below the ceiling,
+                // and -maxrate is the ceiling itself. On VideoToolbox -b:v is
+                // the ceiling and -maxrate its 20% peak allowance.
+                assert_eq!(a.iter().any(|x| x == "-b:v"), fast, "{a:?}");
+                let want = if fast { c * 12 / 10 } else { c };
+                assert!(has(&a, "-maxrate", &format!("{want}k")), "{a:?}");
+                assert_eq!(has(&a, "-crf", &DEFAULT_CRF.to_string()), !fast, "{a:?}");
+                assert!(!a.iter().any(|x| x == "-q:v"), "{a:?}");
             }
         }
         assert_eq!(has(&a, "-preset", "slow"), !fast, "{a:?}");

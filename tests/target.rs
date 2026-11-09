@@ -1,34 +1,37 @@
 use projectmp4::encode::{video_bitrate_kbps, Target};
 
 #[test]
-fn a_short_track_keeps_crf_because_quality_capping_would_raise_the_bitrate() {
-    // 90 s at Discord's 500 MB allows ~40.6 Mb/s, far above CRF 17's measured 16.
-    // Capping there would INFLATE the file. Must return None.
+fn a_short_track_keeps_the_default_because_capping_would_raise_the_bitrate() {
+    // 90 s at Discord's 500 MB allows 40.6 Mb/s. The default encode cannot
+    // exceed its 12 Mb/s ceiling, so it already fits with room to spare, and
+    // capping at the budget would INFLATE the file. Must return None.
     assert_eq!(video_bitrate_kbps(Target::Discord, 90.0, 256).unwrap(), None);
 }
 
 #[test]
 fn a_long_track_is_capped_to_fit_with_margin() {
-    // 300 s at 500 MB: (500e6 * 8 * 0.92 / 300) - 256k ~= 12.0 Mb/s
+    // 300 s at 500 MB leaves a 12010.7 kb/s budget, just above the 12000
+    // ceiling, so the ceiling is what is asked for.
     let k = video_bitrate_kbps(Target::Discord, 300.0, 256).unwrap().unwrap();
-    assert!((11_700..=12_400).contains(&k), "got {k} kbps");
+    assert_eq!(k, 12_000, "got {k} kbps");
     let bytes = (k as f64 + 256.0) * 1000.0 * 300.0 / 8.0;
     assert!(bytes < 500_000_000.0, "{bytes} bytes does not fit 500 MB");
 }
 
 #[test]
 fn the_boundary_is_where_capping_stops_inflating_the_file() {
-    // CAP_CRF_AT = 20000 kbps of budget: 500e6*8*0.92/1000/(20000+256) = 181.7 s.
-    // Under it CRF is kept; over it a cap is used. (The brief's own example put
-    // the switch at 240 s, near CRF 17's raw 4:09 limit, which contradicts its
-    // CAP_CRF_AT constant; the constant is what is implemented. At 240 s the
-    // cap is 15.08 Mb/s, below the measured 16.03 CRF average, so it is needed.)
-    assert_eq!(video_bitrate_kbps(Target::Discord, 180.0, 256).unwrap(), None);
-    assert!(video_bitrate_kbps(Target::Discord, 183.0, 256).unwrap().is_some());
-    let k = video_bitrate_kbps(Target::Discord, 240.0, 256).unwrap().unwrap();
-    assert!(k < 16_030, "a 240 s cap of {k} must undercut CRF 17's measured 16030");
-    // The full 219.72 s sample sits on the capped side.
-    assert!(video_bitrate_kbps(Target::Discord, 219.72, 256).unwrap().is_some());
+    // CAP_CRF_AT = 15000 kbps of budget: 500e6*8*0.92/1000/(15000+256) = 241.2 s.
+    // Under it the default is kept, because it is bounded at 12000 and so
+    // cannot overrun; over it an explicit cap is asked for.
+    assert_eq!(video_bitrate_kbps(Target::Discord, 241.0, 256).unwrap(), None);
+    assert_eq!(video_bitrate_kbps(Target::Discord, 242.0, 256).unwrap(), Some(12_000));
+    // The full 219.72 s sample now sits on the UNCAPPED side, and that is the
+    // point of the ceiling: 219.72 s at 12000 + 256 kb/s is 337 MB, inside
+    // Discord's 500 MB without a cap. Uncapped CRF 17 spent 67.8 Mb/s on this
+    // content, which would have been 1.86 GB.
+    assert_eq!(video_bitrate_kbps(Target::Discord, 219.72, 256).unwrap(), None);
+    let bytes = (12_000.0 + 256.0) * 1000.0 * 219.72 / 8.0;
+    assert!(bytes < 500e6, "{bytes} bytes does not fit 500 MB uncapped");
 }
 
 #[test]
@@ -66,8 +69,10 @@ fn a_zero_or_absurd_duration_cannot_panic_or_divide_by_zero() {
 
 #[test]
 fn the_bitrate_rounds_down() {
-    // 500e6*8*0.92/300/1000 - 256 = 12010.666..: floor, not round.
-    assert_eq!(video_bitrate_kbps(Target::Discord, 300.0, 256).unwrap(), Some(12_010));
+    // 350 s: 500e6*8*0.92/350/1000 - 256 = 10258.2857..: floor, not round.
+    // Chosen past the 300.3 s point where the budget drops under the ceiling,
+    // so the budget itself is the binding value and its fraction is visible.
+    assert_eq!(video_bitrate_kbps(Target::Discord, 350.0, 256).unwrap(), Some(10_258));
 }
 
 #[test]
@@ -79,20 +84,22 @@ fn target_names_round_trip() {
 }
 
 #[test]
-fn capping_never_asks_for_more_bitrate_than_crf_would_spend() {
-    // Across the window where the budget sits between CRF's cost (16030) and
-    // CAP_CRF_AT (20000), a cap at the full budget would inflate the file.
-    for tenths in 1820..=2260 {
+fn capping_never_asks_for_more_bitrate_than_the_default_would_spend() {
+    // Across the window where the budget sits between the ceiling (12000) and
+    // CAP_CRF_AT (15000) — 241.3 s to 300.2 s — a cap at the full budget would
+    // ask for more than the default encode can even produce, inflating the file.
+    for tenths in 2420..=3002 {
         let d = tenths as f64 / 10.0;
         let budget = 500e6 * 8.0 * 0.92 / d / 1000.0 - 256.0;
         let k = video_bitrate_kbps(Target::Discord, d, 256).unwrap().unwrap() as f64;
-        assert!(k <= 16_030.0, "{d} s: {k} kbps exceeds CRF 17's 16030");
+        assert!(k <= 12_000.0, "{d} s: {k} kbps exceeds the 12000 ceiling");
         assert!(k <= budget, "{d} s: {k} kbps exceeds the budget {budget}");
     }
-    assert_eq!(video_bitrate_kbps(Target::Discord, 182.0, 256).unwrap(), Some(16_030));
-    assert_eq!(video_bitrate_kbps(Target::Discord, 219.72, 256).unwrap(), Some(16_030));
-    // Where the budget is already below CRF's cost it is used as is.
-    assert_eq!(video_bitrate_kbps(Target::Discord, 240.0, 256).unwrap(), Some(15_077));
+    assert_eq!(video_bitrate_kbps(Target::Discord, 242.0, 256).unwrap(), Some(12_000));
+    assert_eq!(video_bitrate_kbps(Target::Discord, 300.0, 256).unwrap(), Some(12_000));
+    // Where the budget is already below the ceiling it is used as is.
+    assert_eq!(video_bitrate_kbps(Target::Discord, 301.0, 256).unwrap(), Some(11_969));
+    assert_eq!(video_bitrate_kbps(Target::Discord, 400.0, 256).unwrap(), Some(8_944));
 }
 
 // --- The --fast encoder sizes differently from libx264 ---
@@ -100,11 +107,13 @@ fn capping_never_asks_for_more_bitrate_than_crf_would_spend() {
 #[test]
 fn the_fast_encoder_never_trusts_constant_quality_to_fit_a_capped_target() {
     use projectmp4::encode::video_bitrate_kbps_fast;
-    // Regression. 176.87 s at Discord's 500 MB leaves ~20.55 Mb/s, just over
-    // CAP_CRF_AT, so the libx264 sizing says "CRF 17 already fits" and caps
-    // nothing. On h264_videotoolbox that same None means `-q:v 65`, which
-    // measured 109 Mb/s on this content and wrote a 2.4 GB file against a
-    // 500 MB cap. The fast sizing must hand back a real bitrate.
+    // 176.87 s at Discord's 500 MB leaves 20.55 Mb/s, above CAP_CRF_AT, so the
+    // libx264 sizing says "the default already fits" and caps nothing. The two
+    // encoders do not cost the same, so the fast sizing does not inherit that
+    // answer: it hands back the real budget, which is also the larger of the
+    // two and so the better quality. The original defect here was the fast
+    // default being `-q:v 65`, measured at 109 Mb/s, which wrote 2.4 GB against
+    // a 500 MB cap; both the default and this sizing now bound it.
     assert_eq!(video_bitrate_kbps(Target::Discord, 176.87, 256).unwrap(), None);
     let k = video_bitrate_kbps_fast(Target::Discord, 176.87, 256).unwrap().expect("a capped target must be capped");
     assert_eq!(k, 20_550);
@@ -121,7 +130,7 @@ fn the_fast_encoder_never_trusts_constant_quality_to_fit_a_capped_target() {
 }
 
 #[test]
-fn the_fast_encoder_still_uses_constant_quality_where_nothing_caps_it() {
+fn the_fast_encoder_keeps_its_default_where_nothing_caps_it() {
     use projectmp4::encode::video_bitrate_kbps_fast;
     for t in [Target::None, Target::YouTube] {
         assert_eq!(video_bitrate_kbps_fast(t, 300.0, 256).unwrap(), None, "{t:?}");
