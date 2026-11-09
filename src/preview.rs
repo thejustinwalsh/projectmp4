@@ -513,6 +513,23 @@ pub struct PreviewStats {
     /// Time inside the draw (projectM + swap), summed and worst.
     pub draw_total: Duration,
     pub draw_worst: Duration,
+    /// Which frame `draw_worst` was, and the worst after the first second.
+    /// A one-off stall while the window and the GL driver warm up says nothing
+    /// about playback; a stall in the middle of a track is the one to chase.
+    pub draw_worst_frame: u64,
+    pub draw_worst_settled: Duration,
+    pub draw_worst_settled_frame: u64,
+    /// Draws that took longer than one frame of wall clock. A dropped frame has
+    /// exactly two possible causes: a draw that overran the budget, or a wake-up
+    /// that came too late to start one. This counter tells them apart -- if it is
+    /// far below `dropped`, the drawing is keeping up and the pacing is not.
+    pub draws_over_budget: u64,
+    /// Of `draw_total`, the part spent in `swap_buffers` and the part spent
+    /// fetching and feeding PCM. Everything else is projectM (`render_total`).
+    pub swap_total: Duration,
+    pub swap_worst: Duration,
+    pub pcm_total: Duration,
+    pub pcm_worst: Duration,
     /// Of `draw_total`, the part inside projectM.
     pub render_total: Duration,
 }
@@ -588,8 +605,12 @@ impl App<'_> {
         let end = (((due.frame + 1) as f64 * rate / self.fps as f64).round() as usize).max(self.fed);
         let start = self.fed.max(end.saturating_sub((rate / 10.0) as usize));
         if end > start {
+            let tp = Instant::now();
             let window = self.driver.window((start as f64 + 0.5) / rate, end - start);
             self.pm.pcm_add_float(window, crate::ffi::Channels::Stereo);
+            let e = tp.elapsed();
+            self.stats.pcm_total += e;
+            self.stats.pcm_worst = self.stats.pcm_worst.max(e);
         }
         self.fed = end;
         self.pm.set_frame_time(due.frame as f64 / self.fps as f64);
@@ -615,8 +636,24 @@ impl App<'_> {
         let bass = self.bass.get(due.frame as usize).or(self.bass.last()).copied().unwrap_or(0.0);
         self.gl_overlay.draw(&self.overlay, self.size.0, self.size.1, bass);
         self.stats.render_total += t0.elapsed();
+        let tsw = Instant::now();
         self.gl.surface.swap_buffers(&self.gl.ctx).map_err(|e| Error::msg(format!("swap buffers: {e}")))?;
+        let esw = tsw.elapsed();
+        self.stats.swap_total += esw;
+        self.stats.swap_worst = self.stats.swap_worst.max(esw);
         let took = started.elapsed();
+        if took > self.stats.draw_worst {
+            self.stats.draw_worst_frame = due.frame;
+        }
+        if took.as_secs_f64() > 1.0 / self.fps as f64 {
+            self.stats.draws_over_budget += 1;
+        }
+        // "Settled" means past the first second, by which point the surface,
+        // the shader cache and the first preset have all been paid for.
+        if due.frame >= self.fps as u64 && took > self.stats.draw_worst_settled {
+            self.stats.draw_worst_settled = took;
+            self.stats.draw_worst_settled_frame = due.frame;
+        }
         self.stats.draw_total += took;
         self.stats.draw_worst = self.stats.draw_worst.max(took);
         Ok(())
@@ -800,7 +837,7 @@ pub fn preview(args: &RenderArgs) -> Result<()> {
         ..app.stats.clone()
     };
     eprintln!(
-        "preview: drew {} frames, dropped {} ({:.1}%), {:.1} fps over {:.1} s; render avg {:.1} ms, draw avg {:.1} ms, worst {:.1} ms",
+        "preview: drew {} frames, dropped {} ({:.1}%), {:.1} fps over {:.1} s; render avg {:.1} ms, draw avg {:.1} ms, worst {:.1} ms at frame {}, worst after warm-up {:.1} ms at frame {}, {} draws over budget; swap avg {:.1} ms worst {:.1} ms, pcm avg {:.1} ms worst {:.1} ms",
         s.rendered,
         s.dropped,
         100.0 * s.dropped as f64 / (s.rendered + s.dropped).max(1) as f64,
@@ -809,6 +846,14 @@ pub fn preview(args: &RenderArgs) -> Result<()> {
         s.render_total.as_secs_f64() * 1000.0 / s.rendered.max(1) as f64,
         s.draw_total.as_secs_f64() * 1000.0 / s.rendered.max(1) as f64,
         s.draw_worst.as_secs_f64() * 1000.0,
+        s.draw_worst_frame,
+        s.draw_worst_settled.as_secs_f64() * 1000.0,
+        s.draw_worst_settled_frame,
+        s.draws_over_budget,
+        s.swap_total.as_secs_f64() * 1000.0 / s.rendered.max(1) as f64,
+        s.swap_worst.as_secs_f64() * 1000.0,
+        s.pcm_total.as_secs_f64() * 1000.0 / s.rendered.max(1) as f64,
+        s.pcm_worst.as_secs_f64() * 1000.0,
     );
     Ok(())
 }
