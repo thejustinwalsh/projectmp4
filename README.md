@@ -20,29 +20,37 @@ provenance and every local change.
 ```
 git clone <repo>
 cd projectmp4
-./scripts/fetch-models.sh
 PROJECTMP4_NO_PARITY_ORACLE=1 cargo test --no-fail-fast
 ```
 
-The environment variable is explained under [Running the full
-gate](#running-the-full-gate); a clone needs it, and nothing else.
+There is no setup step. The environment variable is explained under [Running
+the full gate](#running-the-full-gate); a clone needs it, and nothing else.
 
-`fetch-models.sh` downloads the two beat-tracking ONNX models into
-`crates/track-analysis/models`, pinned to an exact upstream commit and verified
-by sha256. They are gitignored: this repository carries what is needed to build
-it, and 10 MB of third-party weights nobody edits is a dependency to fetch, not
-source to commit. Run it once after cloning. It is idempotent, so running it
-again is free.
+### What is committed, and what is fetched
 
-Two further pieces are fetched rather than committed, for the same reason:
+Everything needed to build and run is in the repository. What is left out is
+model weights — bytes nobody edits, published elsewhere, and pinned here by an
+exact commit or revision plus a sha256. Each one is fetched by whichever stage
+first needs it, so nothing has to be run by hand:
 
-- **Preset packs** — `cargo run --release -- init` clones the pinned community
-  packs into the cache. `presets/profiles.toml` records which presets were
-  chosen; the packs themselves are not in the repository.
-- **`vendor/stems-runtime`** — the stem-separation runtime, needed only for
-  `--clip drop` and `--clip intro` and for the stem-parity test. Everything
-  else builds and runs without it, and the tests that need it skip when it is
-  absent.
+| weight | size | fetched by | needed for |
+| --- | --- | --- | --- |
+| `beat_this_small.onnx`, `mel_spectrogram.onnx` | 11 MB | `build.rs`, when absent | every render: the beat grid |
+| `htdemucs-q8_0.gguf` | 62 MB | first `--clip drop` / `--clip intro` | separating stems to find a section |
+| community preset packs | 200 MB | `cargo run --release -- init` | the preset lists in `presets/profiles.toml` |
+
+`scripts/fetch-models.sh` is what does the first two, and it takes a group
+(`beat`, `stems`, or neither for both) so each stage asks only for what it
+needs. Running it yourself just does that work earlier. It is idempotent: a
+file already present with the right hash is left alone, and a hash that does
+not match the pin is refused rather than used.
+
+The rest of `vendor/stems-runtime` **is** committed — a prebuilt arm64 worker
+and two dylibs, 5.4 MB. Unlike the weights these are published nowhere, so
+there is no pin that would make fetching them reproducible, and a copy in the
+repository is the only version-control record of them that exists. They are
+relocatable (`@loader_path`, and otherwise only system libraries), so they run
+from wherever the checkout is.
 
 ## Output
 

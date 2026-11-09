@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "worker": "deck_stem_worker",
+  "workerSha256": "781503e5e5985dada15fa6afd6ca7f98d4f61f76bb6c4638d1fb321639eaad0b",
+  "model": "htdemucs-q8_0.gguf",
+  "modelSha256": "b0f532ac6e5f373aeb11fa0df73253251e133832d9c8b9942dc58f50bc5b4388",
+  "identity": "068c4213b0342900f4346a8bea565e5b1bc9c4eb49ca0d671fe7d40be5ac1b6b",
+  "libraries": [
+    {
+      "path": "libaudiocpp.0.dylib",
+      "sha256": "ac992d40c7882b8a445e928afff2be7f8c7f3e7a11feb045b423cde773c8eace"
+    },
+    {
+      "path": "libdeck_media_codec.dylib",
+      "sha256": "96e67d8bccf955b0f268de10c2524a23935fde6878b238db01b7d0d5e9555daf"
+    }
+  ],
+  "provenance": {
+    "sourceCommit": "0097d365a00b52a6991ad7618f0a04e8d2935e47",
+    "modelRevision": "4c9a3098d552a0f3d9b2adc11638a11022c07d7e",
+    "sourcePolicy": "sinc64-centered-v1/wola6s-hop4.5s-v1",
+    "platform": "macos-arm64",
+    "runtimePython": false
+  }
+}

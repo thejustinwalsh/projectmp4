@@ -3,5 +3,8 @@
 /presets/packs
 /.superpowers
 *.mp4
-/vendor/stems-runtime
+# The stem-separation package is committed — a prebuilt arm64 worker and two
+# dylibs, 5.4 MB, that are published nowhere and so cannot be fetched. Its
+# model is 62 MB with a pinned HuggingFace revision, so that one is fetched.
+/vendor/stems-runtime/htdemucs-q8_0.gguf
 /crates/track-analysis/models

@@ -53,15 +53,67 @@ fn verify(dir: &Path, rel: &str, want: &str) -> Result<PathBuf> {
     Ok(p)
 }
 
+/// Fetch the separation model into `dir` if it is not there yet.
+///
+/// Returns `Ok(())` when the file is already present; `from_dir` then verifies
+/// its hash as it always has, so a corrupt file is still caught here and again
+/// by the worker. Absent, the pinned fetch runs; the model name comes from
+/// `runtime.json` so the pin lives in one place.
+fn ensure_model(dir: &Path) -> Result<()> {
+    let manifest = dir.join("runtime.json");
+    let Ok(text) = std::fs::read(&manifest) else {
+        // Let `from_dir` produce the error: it names the file and the reason.
+        return Ok(());
+    };
+    let name = serde_json::from_slice::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|j| j.get("model").and_then(|m| m.as_str()).map(str::to_owned));
+    let Some(name) = name else { return Ok(()) };
+    if dir.join(&name).is_file() {
+        return Ok(());
+    }
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/fetch-models.sh");
+    if !script.is_file() {
+        return Err(Error::msg(format!(
+            "stems runtime: {name} is missing and {} is not here to fetch it. \
+             Separation needs that model; the pin and its url are in that script \
+             in the repository.",
+            script.display()
+        )));
+    }
+    eprintln!("clip: fetching the separation model (62 MB, once)");
+    let st = std::process::Command::new("bash")
+        .arg(&script)
+        .arg("stems")
+        .status()
+        .map_err(|e| Error::msg(format!("stems runtime: cannot run {}: {e}", script.display())))?;
+    if !st.success() {
+        return Err(Error::msg(format!(
+            "stems runtime: {} exited {st} without fetching {name}",
+            script.display()
+        )));
+    }
+    Ok(())
+}
+
 impl Runtime {
     /// Resolve and verify the vendored package. Errors name the missing or
     /// corrupt file.
+    ///
+    /// The package is committed except for its 62 MB model, which is fetched on
+    /// first use. Only `--clip drop` and `--clip intro` reach this function, so
+    /// everyone who never asks for a clip never pays for the download. An
+    /// explicit `PROJECTMP4_STEMS_RUNTIME` is taken exactly as given and
+    /// nothing is fetched into it: that directory is the caller's, not ours.
     pub fn locate() -> Result<Runtime> {
-        let dir = match std::env::var_os("PROJECTMP4_STEMS_RUNTIME") {
-            Some(d) => PathBuf::from(d),
-            None => Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/stems-runtime"),
-        };
-        Self::from_dir(&dir)
+        match std::env::var_os("PROJECTMP4_STEMS_RUNTIME") {
+            Some(d) => Self::from_dir(&PathBuf::from(d)),
+            None => {
+                let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/stems-runtime");
+                ensure_model(&dir)?;
+                Self::from_dir(&dir)
+            }
+        }
     }
 
     fn from_dir(dir: &Path) -> Result<Runtime> {
