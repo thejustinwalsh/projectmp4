@@ -33,8 +33,30 @@ pub const HEIGHT: u32 = 1080;
 /// 21/20 of 1920x1080 is 2016x1134, both even, so the crop margin is a whole
 /// 48 columns and 27 rows on each side. The cost is the 10% more pixels
 /// projectM shades.
-pub const RENDER_WIDTH: u32 = WIDTH * 21 / 20;
-pub const RENDER_HEIGHT: u32 = HEIGHT * 21 / 20;
+///
+/// The preview draws the same way, at its own window size, so the two agree by
+/// construction rather than by two places happening to compute the same thing.
+/// That is why the margin is a function and not a ratio applied twice: at
+/// 960x540 a flat 21/20 gives 567 rows and an uneven 13.5-row margin, which
+/// would shift the preview's framing half a row off the render's.
+pub const RENDER_WIDTH: u32 = overscanned(WIDTH, HEIGHT).0;
+pub const RENDER_HEIGHT: u32 = overscanned(WIDTH, HEIGHT).1;
+
+/// Each side's overscan margin for a kept frame of `w x h`: 2.5% of the
+/// dimension, floored. Both sides get the same number of whole pixels, so
+/// `overscanned` is always `w` and `h` plus an even number and the kept frame
+/// is exactly centred.
+pub const fn overscan_margin(w: u32, h: u32) -> (u32, u32) {
+    (w / 40, h / 40)
+}
+
+/// The size projectM must draw for the centre `w x h` of it to be the frame
+/// that is kept. Both the render and the preview size projectM with this.
+pub const fn overscanned(w: u32, h: u32) -> (u32, u32) {
+    let (mx, my) = overscan_margin(w, h);
+    (w + 2 * mx, h + 2 * my)
+}
+
 pub const DEFAULT_PROFILE: &str = "deathstep";
 /// Seconds between ordinary preset changes, and between a drop's hard cuts.
 pub const MIN_GAP: f64 = 8.0;

@@ -123,6 +123,7 @@ mod gl {
 
     pub const FRAMEBUFFER: GLenum = 0x8D40;
     pub const READ_FRAMEBUFFER: GLenum = 0x8CA8;
+    pub const DRAW_FRAMEBUFFER: GLenum = 0x8CA9;
     pub const RENDERBUFFER: GLenum = 0x8D41;
     pub const TEXTURE_2D: GLenum = 0x0DE1;
     pub const RGBA8: GLint = 0x8058;
@@ -137,6 +138,8 @@ mod gl {
     pub const TEXTURE_WRAP_S: GLenum = 0x2802;
     pub const TEXTURE_WRAP_T: GLenum = 0x2803;
     pub const LINEAR: GLint = 0x2601;
+    pub const NEAREST: GLint = 0x2600;
+    pub const SCISSOR_TEST: GLenum = 0x0C11;
     pub const CLAMP_TO_EDGE: GLint = 0x812F;
     pub const PACK_ALIGNMENT: GLenum = 0x0D05;
     pub const READ_FRAMEBUFFER_BINDING: GLenum = 0x8CAA;
@@ -220,6 +223,25 @@ mod gl {
         pub fn get_integer_v(pname: GLenum, data: *mut GLint);
         #[link_name = "glViewport"]
         pub fn viewport(x: GLint, y: GLint, width: GLsizei, height: GLsizei);
+        #[link_name = "glScissor"]
+        pub fn scissor(x: GLint, y: GLint, width: GLsizei, height: GLsizei);
+        #[link_name = "glEnable"]
+        pub fn enable(cap: GLenum);
+        #[link_name = "glDisable"]
+        pub fn disable(cap: GLenum);
+        #[link_name = "glBlitFramebuffer"]
+        pub fn blit_framebuffer(
+            src_x0: GLint,
+            src_y0: GLint,
+            src_x1: GLint,
+            src_y1: GLint,
+            dst_x0: GLint,
+            dst_y0: GLint,
+            dst_x1: GLint,
+            dst_y1: GLint,
+            mask: GLbitfield,
+            filter: GLenum,
+        );
         #[link_name = "glClearColor"]
         pub fn clear_color(r: GLfloat, g: GLfloat, b: GLfloat, a: GLfloat);
         #[link_name = "glClear"]
@@ -277,6 +299,84 @@ pub struct GlContext {
     fbo: gl::GLuint,
     color: gl::GLuint,
     depth: gl::GLuint,
+}
+
+/// Allocates an RGBA8 + depth24 framebuffer of `w x h` in the current context,
+/// binds it, clears it, and writes its ids into the out-parameters.
+///
+/// The ids are written as each object is created rather than returned at the
+/// end, so a caller whose `Drop` deletes them still cleans up the ones that
+/// were made before a failure.
+///
+/// Both render targets come from here: the headless one [`GlContext`] owns and
+/// the preview's overscan buffer, so projectM draws into the same kind of
+/// surface either way.
+fn make_framebuffer(
+    w: u32,
+    h: u32,
+    fbo: &mut gl::GLuint,
+    color: &mut gl::GLuint,
+    depth: &mut gl::GLuint,
+) -> Result<()> {
+    let (w, h) = (w as gl::GLsizei, h as gl::GLsizei);
+    unsafe {
+        // Drain any error the context creation path may have left behind.
+        let _ = gl::get_error();
+
+        gl::gen_framebuffers(1, fbo);
+        gl::bind_framebuffer(gl::FRAMEBUFFER, *fbo);
+
+        gl::gen_textures(1, color);
+        gl::bind_texture(gl::TEXTURE_2D, *color);
+        gl::tex_image_2d(
+            gl::TEXTURE_2D,
+            0,
+            gl::RGBA8,
+            w,
+            h,
+            0,
+            gl::RGBA,
+            gl::UNSIGNED_BYTE,
+            std::ptr::null(),
+        );
+        gl::tex_parameter_i(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR);
+        gl::tex_parameter_i(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR);
+        gl::tex_parameter_i(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE);
+        gl::tex_parameter_i(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE);
+        gl::framebuffer_texture_2d(
+            gl::FRAMEBUFFER,
+            gl::COLOR_ATTACHMENT0,
+            gl::TEXTURE_2D,
+            *color,
+            0,
+        );
+
+        gl::gen_renderbuffers(1, depth);
+        gl::bind_renderbuffer(gl::RENDERBUFFER, *depth);
+        gl::renderbuffer_storage(gl::RENDERBUFFER, gl::DEPTH_COMPONENT24, w, h);
+        gl::framebuffer_renderbuffer(
+            gl::FRAMEBUFFER,
+            gl::DEPTH_ATTACHMENT,
+            gl::RENDERBUFFER,
+            *depth,
+        );
+
+        gl_check("allocating the offscreen framebuffer")?;
+
+        let status = gl::check_framebuffer_status(gl::FRAMEBUFFER);
+        if status != gl::FRAMEBUFFER_COMPLETE {
+            return Err(Error::msg(format!(
+                "framebuffer incomplete: glCheckFramebufferStatus = 0x{status:04X} \
+                 ({w}x{h} RGBA8 + depth24)"
+            )));
+        }
+
+        gl::viewport(0, 0, w, h);
+        gl::clear_color(0.0, 0.0, 0.0, 1.0);
+        gl::clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
+        gl_check("clearing the offscreen framebuffer")?;
+    }
+    Ok(())
 }
 
 impl GlContext {
@@ -344,67 +444,7 @@ impl GlContext {
     }
 
     fn build_framebuffer(&mut self) -> Result<()> {
-        let w = self.width as gl::GLsizei;
-        let h = self.height as gl::GLsizei;
-        unsafe {
-            // Drain any error the context creation path may have left behind.
-            let _ = gl::get_error();
-
-            gl::gen_framebuffers(1, &mut self.fbo);
-            gl::bind_framebuffer(gl::FRAMEBUFFER, self.fbo);
-
-            gl::gen_textures(1, &mut self.color);
-            gl::bind_texture(gl::TEXTURE_2D, self.color);
-            gl::tex_image_2d(
-                gl::TEXTURE_2D,
-                0,
-                gl::RGBA8,
-                w,
-                h,
-                0,
-                gl::RGBA,
-                gl::UNSIGNED_BYTE,
-                std::ptr::null(),
-            );
-            gl::tex_parameter_i(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR);
-            gl::tex_parameter_i(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR);
-            gl::tex_parameter_i(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE);
-            gl::tex_parameter_i(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE);
-            gl::framebuffer_texture_2d(
-                gl::FRAMEBUFFER,
-                gl::COLOR_ATTACHMENT0,
-                gl::TEXTURE_2D,
-                self.color,
-                0,
-            );
-
-            gl::gen_renderbuffers(1, &mut self.depth);
-            gl::bind_renderbuffer(gl::RENDERBUFFER, self.depth);
-            gl::renderbuffer_storage(gl::RENDERBUFFER, gl::DEPTH_COMPONENT24, w, h);
-            gl::framebuffer_renderbuffer(
-                gl::FRAMEBUFFER,
-                gl::DEPTH_ATTACHMENT,
-                gl::RENDERBUFFER,
-                self.depth,
-            );
-
-            gl_check("allocating the offscreen framebuffer")?;
-
-            let status = gl::check_framebuffer_status(gl::FRAMEBUFFER);
-            if status != gl::FRAMEBUFFER_COMPLETE {
-                return Err(Error::msg(format!(
-                    "framebuffer incomplete: glCheckFramebufferStatus = 0x{status:04X} \
-                     ({}x{} RGBA8 + depth24)",
-                    self.width, self.height
-                )));
-            }
-
-            gl::viewport(0, 0, w, h);
-            gl::clear_color(0.0, 0.0, 0.0, 1.0);
-            gl::clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
-            gl_check("clearing the offscreen framebuffer")?;
-        }
-        Ok(())
+        make_framebuffer(self.width, self.height, &mut self.fbo, &mut self.color, &mut self.depth)
     }
 
     /// Fails loudly if this context is not current on the calling thread,
@@ -564,6 +604,159 @@ impl MakeCurrent for GlContext {
 /// (the preview window's). Same function the headless context uses.
 pub fn proc_loader() -> LoadProc {
     gl_load_proc
+}
+
+/// An off-screen RGBA8 + depth24 render target in whatever context is current,
+/// plus the blit that puts its centre onto another framebuffer.
+///
+/// This is how the preview draws overscanned. `render` can crop on the CPU
+/// because it reads every frame back anyway; the preview reads nothing back, so
+/// it renders projectM into one of these at
+/// [`overscanned`](crate::render::plan::overscanned) size and blits the kept
+/// centre onto the window. Same framing, no readback.
+///
+/// It owns GL objects but not a context: the context current when it is made
+/// must be current when it is used and when it is dropped.
+pub struct Offscreen {
+    fbo: gl::GLuint,
+    color: gl::GLuint,
+    depth: gl::GLuint,
+    w: u32,
+    h: u32,
+}
+
+impl Offscreen {
+    /// Allocates the target. The current context's own framebuffer binding is
+    /// left pointing at it, as [`GlContext`] also leaves it.
+    pub fn new(w: u32, h: u32) -> Result<Offscreen> {
+        if w == 0 || h == 0 {
+            return Err(Error::msg("Offscreen::new requires a non-empty size"));
+        }
+        let mut o = Offscreen { fbo: 0, color: 0, depth: 0, w, h };
+        make_framebuffer(w, h, &mut o.fbo, &mut o.color, &mut o.depth)?;
+        Ok(o)
+    }
+
+    /// What to pass projectM's `render_frame_fbo`.
+    pub fn fbo(&self) -> u32 {
+        self.fbo
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        (self.w, self.h)
+    }
+
+    /// Blits the centre `w x h` of this target onto `dst` — framebuffer 0 being
+    /// the window — and leaves `dst` bound with a `w x h` viewport, ready for
+    /// whatever draws on top.
+    ///
+    /// There is no vertical flip here, unlike `render`'s `crop_flip`. Both
+    /// framebuffers use GL's bottom-up rows, so the copy is row-for-row; the
+    /// render flips because it is handing frames to a video encoder, which
+    /// wants them top-down.
+    pub fn blit_centre(&self, dst: u32, w: u32, h: u32) -> Result<()> {
+        if w == 0 || h == 0 || w > self.w || h > self.h {
+            return Err(Error::msg(format!(
+                "Offscreen::blit_centre: {}x{} cannot yield {w}x{h}",
+                self.w, self.h
+            )));
+        }
+        // Whole pixels on both sides, guaranteed by `overscan_margin`.
+        let (ox, oy) = ((self.w - w) / 2, (self.h - h) / 2);
+        unsafe {
+            let _ = gl::get_error();
+            gl::bind_framebuffer(gl::READ_FRAMEBUFFER, self.fbo);
+            gl::bind_framebuffer(gl::DRAW_FRAMEBUFFER, dst);
+            gl::blit_framebuffer(
+                ox as gl::GLint,
+                oy as gl::GLint,
+                (ox + w) as gl::GLint,
+                (oy + h) as gl::GLint,
+                0,
+                0,
+                w as gl::GLint,
+                h as gl::GLint,
+                gl::COLOR_BUFFER_BIT,
+                // The filter is a GLenum here; NEAREST is typed for
+                // glTexParameteri, where it is a GLint.
+                gl::NEAREST as gl::GLenum,
+            );
+            gl_check("blitting the overscanned frame")?;
+            gl::bind_framebuffer(gl::FRAMEBUFFER, dst);
+            gl::viewport(0, 0, w as gl::GLsizei, h as gl::GLsizei);
+            gl_check("binding the blit destination")?;
+        }
+        Ok(())
+    }
+
+    /// Reads this target's colour attachment back as tightly packed RGBA8,
+    /// bottom-up, exactly as [`GlContext::read_rgba_into`] does and with the
+    /// same global state saved and restored.
+    pub fn read_rgba_into(&self, buf: &mut [u8]) -> Result<()> {
+        let len = (self.w as usize) * (self.h as usize) * 4;
+        if buf.len() != len {
+            return Err(Error::msg(format!("read buffer is {} bytes, expected {len}", buf.len())));
+        }
+        let mut prev_fb: gl::GLint = 0;
+        let mut prev_align: gl::GLint = 4;
+        unsafe {
+            let _ = gl::get_error();
+            gl::get_integer_v(gl::READ_FRAMEBUFFER_BINDING, &mut prev_fb);
+            gl::get_integer_v(gl::PACK_ALIGNMENT, &mut prev_align);
+            gl::bind_framebuffer(gl::READ_FRAMEBUFFER, self.fbo);
+            gl::pixel_store_i(gl::PACK_ALIGNMENT, 1);
+            gl::read_pixels(
+                0,
+                0,
+                self.w as gl::GLsizei,
+                self.h as gl::GLsizei,
+                gl::RGBA,
+                gl::UNSIGNED_BYTE,
+                buf.as_mut_ptr() as *mut c_void,
+            );
+            gl::pixel_store_i(gl::PACK_ALIGNMENT, prev_align);
+            gl::bind_framebuffer(gl::READ_FRAMEBUFFER, prev_fb as gl::GLuint);
+        }
+        gl_check("glReadPixels from an Offscreen")?;
+        Ok(())
+    }
+
+    /// Clears the whole target to `all`, then the rectangle `(x, y, w, h)` —
+    /// bottom-left origin — to `rect`. Two scissored clears, no shader.
+    pub fn paint_rect(&self, all: [f32; 4], x: u32, y: u32, w: u32, h: u32, rect: [f32; 4]) -> Result<()> {
+        unsafe {
+            let _ = gl::get_error();
+            gl::bind_framebuffer(gl::FRAMEBUFFER, self.fbo);
+            gl::disable(gl::SCISSOR_TEST);
+            gl::viewport(0, 0, self.w as gl::GLsizei, self.h as gl::GLsizei);
+            gl::clear_color(all[0], all[1], all[2], all[3]);
+            gl::clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
+            gl::enable(gl::SCISSOR_TEST);
+            gl::scissor(x as gl::GLint, y as gl::GLint, w as gl::GLsizei, h as gl::GLsizei);
+            gl::clear_color(rect[0], rect[1], rect[2], rect[3]);
+            gl::clear(gl::COLOR_BUFFER_BIT);
+            gl::disable(gl::SCISSOR_TEST);
+        }
+        gl_check("painting an Offscreen")
+    }
+}
+
+impl Drop for Offscreen {
+    fn drop(&mut self) {
+        // Reverse of creation order, and each guarded: a failed `new` drops a
+        // partly built target.
+        unsafe {
+            if self.depth != 0 {
+                gl::delete_renderbuffers(1, &self.depth);
+            }
+            if self.color != 0 {
+                gl::delete_textures(1, &self.color);
+            }
+            if self.fbo != 0 {
+                gl::delete_framebuffers(1, &self.fbo);
+            }
+        }
+    }
 }
 
 impl Drop for GlContext {

@@ -43,6 +43,8 @@ enum Cmd {
 /// preview of a track is the render of it, with one exception: `--target`
 /// belongs to `render`, so `preview --clip drop` never applies the 135 s that
 /// `--target x` implies and cuts the section's own length (or `--clip-seconds`).
+/// Framing matches as well: the preview draws overscanned and shows the cropped
+/// centre, the same frame the render writes (see [`crate::preview`]).
 #[derive(Args)]
 struct PlanCmd {
     input: PathBuf,

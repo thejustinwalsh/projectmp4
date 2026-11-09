@@ -5,6 +5,14 @@
 //! same `n / fps` timestamp for frame `n` -- so a track previews the way it
 //! will render. The keys are an override on top of that schedule.
 //!
+//! Framing is part of that. projectM's warp mesh samples outside the previous
+//! frame at the edge of the viewport, so the outermost rows and columns smear.
+//! The render has always drawn [`overscanned`] and kept the centre; the preview
+//! now does the same, into its own framebuffer, and blits that centre to the
+//! window -- so the preview shows the frame the render keeps and not the 5%
+//! border the render crops. Both paths then apply the guard and the overlay to
+//! the cropped frame, in that order.
+//!
 //! Timing is the opposite of the offline loop. The render keeps a virtual
 //! clock (`t = n / fps`) and never drops a frame, because every frame of a
 //! file must exist. Here the *audio device* is the clock: audio is continuous
@@ -20,12 +28,12 @@
 use crate::audio::timeline::Cut;
 use winit::keyboard::{KeyCode, PhysicalKey};
 use crate::ffi::{Error, Instance, MakeCurrent, Result};
-use crate::gl_context::proc_loader;
+use crate::gl_context::{proc_loader, Offscreen};
 use crate::gl_overlay::GlOverlay;
 use crate::render::flash::FlashGuard;
 use crate::render::r#loop::bass_per_frame;
 use crate::render::Overlay;
-use crate::render::plan::{prepare, RenderArgs, RenderPlan};
+use crate::render::plan::{overscanned, prepare, RenderArgs, RenderPlan};
 use crate::render::r#loop::switch_frames;
 use std::path::{Path, PathBuf};
 
@@ -523,6 +531,9 @@ struct App<'a> {
     driver: &'a crate::audio::Driver,
     overlay: Overlay,
     gl_overlay: GlOverlay,
+    /// projectM draws into this at the overscanned size; its centre is blitted
+    /// to the window, which is what `render` keeps. Rebuilt on resize.
+    off: Offscreen,
     /// Limits luminance change before the overlay is drawn; `None` under `--no-flash-guard`.
     guard: Option<FlashGuard>,
     guard_buf: Vec<u8>,
@@ -583,7 +594,12 @@ impl App<'_> {
         self.fed = end;
         self.pm.set_frame_time(due.frame as f64 / self.fps as f64);
         let t0 = Instant::now();
-        self.pm.render_frame_fbo(0);
+        // Overscanned into our own target, then the centre onto the window, so
+        // the preview shows the frame `render` would encode and not the 5% of
+        // edge it crops. Everything after this point works on the window at
+        // `self.size`, which is the render's order too: crop, guard, overlay.
+        self.pm.render_frame_fbo(self.off.fbo());
+        self.off.blit_centre(0, self.size.0, self.size.1)?;
         if let Some(g) = self.guard.as_mut() {
             let (w, h) = (self.size.0 as usize, self.size.1 as usize);
             // A window under 8 px a side holds no region WCAG could count.
@@ -645,8 +661,19 @@ impl ApplicationHandler for App<'_> {
                 if let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) {
                     self.gl.surface.resize(&self.gl.ctx, w, h);
                 }
-                self.pm.set_window_size(size.width, size.height);
-                self.size = (size.width, size.height);
+                let (ow, oh) = overscanned(size.width, size.height);
+                match Offscreen::new(ow, oh) {
+                    Ok(off) => {
+                        self.off = off;
+                        self.pm.set_window_size(ow, oh);
+                        self.size = (size.width, size.height);
+                    }
+                    // Keep drawing the old size into the new window: the frame
+                    // then sits in a corner of it until a later resize works.
+                    // The alternative is a blit `draw` refuses, and a refused
+                    // draw ends the preview.
+                    Err(e) => eprintln!("preview: cannot resize the render target to {ow}x{oh}: {e}"),
+                }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && !event.repeat => {
                 if let PhysicalKey::Code(code) = event.physical_key {
@@ -700,7 +727,10 @@ pub fn preview(args: &RenderArgs) -> Result<()> {
     let raw = window.inner_size();
     let size = (raw.width.max(1), raw.height.max(1));
     let (sw, sh) = size;
-    pm.set_window_size(sw, sh);
+    // projectM draws 5% wider and taller than the window; `App::draw` blits the
+    // centre. The mesh is sized for the drawn surface, not the window.
+    let (ow, oh) = overscanned(sw, sh);
+    pm.set_window_size(ow, oh);
     pm.set_mesh_size(64, 48);
     pm.set_fps(plan.fps as i32);
     if let Some(t) = &plan.textures {
@@ -728,6 +758,7 @@ pub fn preview(args: &RenderArgs) -> Result<()> {
         driver: &prep.driver,
         overlay,
         gl_overlay,
+        off: Offscreen::new(ow, oh)?,
         guard: plan.flash_guard.then(|| FlashGuard::new(sw.max(8) as usize, sh.max(8) as usize, plan.fps, plan.flash_rate)),
         guard_buf: Vec::new(),
         guard_total: Duration::ZERO,
