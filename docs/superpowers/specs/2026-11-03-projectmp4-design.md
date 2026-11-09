@@ -530,9 +530,10 @@ say it was not a product, it was a satellite. `crates/README.md` records the cop
 verification.
 
 A detail worth keeping, found while copying: those three directories were **untracked** in
-agent-deck and appear in no commit of its history. Commit `639d8f5` here is the first time that
-code has been under version control anywhere, so there is no upstream revision to cite and nothing
-to diff against. This repository holds the only copy with a history.
+agent-deck and appear in no commit of its history. The commit that vendored them here —
+`9a85a76`, *feat: vendor track-analysis, media-codec and loop-analysis into the repo* — is the
+first time that code has been under version control anywhere, so there is no upstream revision to
+cite and nothing to diff against. This repository holds the only copy with a history.
 
 **Crates, now vendored at `crates/`** (layout mirrors agent-deck's `native/` so nothing inside them
 needed editing — `track-analysis` keeps `path = "../media-codec"` and its `build.rs` keeps
