@@ -524,8 +524,8 @@ crates that produce it** — which supersedes §6.6's "write an RMS + spectral-f
 entirely, and still does.
 
 **Superseded 2026-11-06, at Justin's direction: the crates are copied into this repository and
-owned here.** Path dependencies on `/Users/tjw/Developer/agent-deck/native/` meant projectmp4 would
-not build on any machine without agent-deck checked out at that exact absolute path — which is to
+owned here.** Path dependencies on an absolute path inside a local agent-deck checkout meant
+projectmp4 would not build on any machine without agent-deck sitting at that exact path — which is to
 say it was not a product, it was a satellite. `crates/README.md` records the copy and its
 verification.
 
@@ -649,7 +649,7 @@ the analysis stage. The two Suno mp3s in §10.4 remain valid standalone (no-cach
 
   | Path | Title | Artist | Duration |
   |---|---|---|---|
-  | `/Users/tjw/Downloads/track.mp3` | Sunday Console Rite | tjdubz | 3:39 |
+  | `~/Downloads/track.mp3` | Sunday Console Rite | tjdubz | 3:39 |
   | `~/Library/Mobile Documents/com~apple~CloudDocs/Downloads/Dub T Summer.mp3` | Dub T Summer | tjdubz | 3:00 |
 
   **Useful side-finding that validates a design decision:** Suno writes real ID3 tags —

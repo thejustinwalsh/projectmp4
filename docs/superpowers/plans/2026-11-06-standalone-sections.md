@@ -22,7 +22,8 @@ extension; this plan is its own argument).
 
 - `~/Library/Application Support/agent-deck/` is read-only. Never write, create, move or delete
   anything under it. It is ground truth for tests and nothing else.
-- Do not edit anything under `/Users/tjw/Developer/agent-deck/`. Read it; copy out of it.
+- `<agent-deck>` below stands for the local agent-deck working tree. Do not edit anything
+  under it. Read it; copy out of it.
 - No subagent may open a window on this machine. No `preview`, no windowed example, no GUI
   test, no `screencapture`. The user is photosensitive.
 - Errors use `crate::ffi::{Error, Result}`. Never `anyhow`.
@@ -144,7 +145,7 @@ That pairing is what makes Tasks 18–20 measurable rather than asserted.
 
 - [ ] **Step 1: Vendor the model and its provenance**
 
-Copy `/Users/tjw/Developer/agent-deck/examples/ui-wgpu/native/models/harmonix-fold0-f32.gguf`
+Copy `<agent-deck>/examples/ui-wgpu/native/models/harmonix-fold0-f32.gguf`
 (or wherever `find` locates it under agent-deck) to `assets/models/`. Verify after copying:
 
 ```
@@ -164,7 +165,7 @@ committing.
 
 - [ ] **Step 2: Transcribe the schema**
 
-Convert `/Users/tjw/Developer/agent-deck/native/structure-analysis/tensor_schema.inc` (493
+Convert `<agent-deck>/native/structure-analysis/tensor_schema.inc` (493
 lines of `{"name", {dims}},`) into `SCHEMA` in `src/audio/sections/schema.rs`. Do this with a
 script, not by hand, and assert the entry count afterwards.
 
@@ -246,7 +247,7 @@ git commit -m "feat: GGUF reader and pinned tensor schema for the harmonix secti
 The model analyses at 44100 Hz but the stems are 48000 Hz, and agent-deck resamples with a
 specific filter: `runtime.json` records `sourcePolicy: "sinc64-centered-v1/wola6s-hop4.5s-v1"`,
 and the implementation is
-`/Users/tjw/Developer/agent-deck/native/structure-analysis/src/wav48_stream.h` (91 lines,
+`<agent-deck>/native/structure-analysis/src/wav48_stream.h` (91 lines,
 read-only). Port it exactly — a 64-tap centred sinc with different windowing or a different
 phase convention will shift every frame and fail Step 1 for a reason that looks like a
 spectrogram bug. Test it on its own first: a 1 kHz sine resampled 48k -> 44.1k must stay 1 kHz
@@ -380,7 +381,7 @@ on it.
 - [ ] **Step 1: Read the reference and write the architecture note**
 
 Before writing code, read
-`/Users/tjw/Developer/agent-deck/native/structure-analysis/src/song_structure.cpp` in full and
+`<agent-deck>/native/structure-analysis/src/song_structure.cpp` in full and
 write `.superpowers/sdd/2026-11-03-projectmp4/ssa-architecture.md`: every layer in order, its
 tensor names, shapes, activation, and the exact neighbourhood-attention window. A controller
 may already have placed that file there — if so, check it against the source rather than

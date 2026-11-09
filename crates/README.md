@@ -3,7 +3,7 @@
 These are copies, not dependencies. projectmp4 is one standalone product: it builds and runs on a
 machine that has never seen agent-deck, and nothing here resolves outside this repository.
 Verify that with `cargo metadata` — every path package must sit under
-`/Users/tjw/Developer/projectmp4/`.
+this repository.
 
 | crate | language | size | role |
 |---|---|---|---|
@@ -13,7 +13,8 @@ Verify that with `cargo metadata` — every path package must sit under
 
 ## Where they came from
 
-Copied from `/Users/tjw/Developer/agent-deck/native/` — and this part matters more than it looks:
+Copied from `<agent-deck>/native/`, where `<agent-deck>` stands for wherever that working tree
+lives on the machine doing the copying — and this part matters more than it looks:
 
 **All three directories are untracked in agent-deck.** They appear as `??` in its `git status` and
 are in no commit of its history. agent-deck's HEAD at copy time was `4557dc2`
@@ -94,7 +95,7 @@ is a wasted lookup on every call. It is unrelated to the build being standalone,
 ## Upstream
 
 agent-deck is where this code was written, not a remote we track, and it never committed it.
-Nothing here is pushed back, and `/Users/tjw/Developer/agent-deck/` is read-only from this
+Nothing here is pushed back, and `<agent-deck>/` is read-only from this
 repository.
 
 There is therefore no "upstream fix" to pull in the normal sense. If that working tree changes and
