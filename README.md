@@ -90,6 +90,93 @@ the default cannot exceed the ceiling, a target only has to intervene when the
 cap is tighter than that — for Discord's 500 MB, past about 241 s — which is
 why a 3:39 track needs no target to fit.
 
+## Controller
+
+**Not reachable from the command line yet.** The verbs, the port, the profile
+format and the learn mode are built and tested; nothing is wired into
+`src/cli.rs`, so none of the commands below run today. What follows is the
+design, kept beside the code that implements it.
+
+A profile ships for the Numark MixTrack Go
+(`profiles/midi/numark-mixtrack-go.toml`); any class-compliant controller works
+with a profile of its own, and `midi-learn` writes one by watching the device.
+The surface it is built for:
+
+```bash
+projectmp4 midi-learn --list                        # what the system can see
+projectmp4 midi-learn                               # print what a control sends
+projectmp4 preview track.mp3 --midi                 # bind the shipped profile
+projectmp4 preview track.mp3 --midi --midi-profile mine.toml
+```
+
+Nothing will open a MIDI port without `--midi`, and a controller that is
+absent, busy or unplugged mid-track is a warning on stderr, never an exit.
+
+### What the controls do
+
+One visualiser, two decks, so deck 2 mirrors deck 1 rather than pretending to
+be a second channel. The hardware tracks MODE/SHIFT itself — a held shift makes
+each button send a different note — so the shift layer costs nothing to support.
+
+| Control | Does |
+| --- | --- |
+| Crossfader | Blends what the visualiser listens to: rhythm ↔ melody |
+| Acapella / Instrumental | The hard snaps of that same axis; shifted, back to the whole mix |
+| Filter/Low 1, 2 | Reaction drive, and projectM's beat sensitivity |
+| Pitch fader 1, 2 | The same two, 14-bit, for setting a value rather than sweeping it |
+| Jog wheels, Browse | Step through the preset pool |
+| Pads | Jump to pool slot 0–11 |
+| Play | Pause and resume |
+| Cue | Back ten seconds; shifted, forward ten |
+| Sync | Rejoin the render's preset schedule |
+| Browse push, Play+shift | Freeze the preset on screen |
+| Fade FX | Soft transition or hard cut |
+| Fade FX +shift | Toggle the flash guard |
+| PFL, Load 1 | Print the current preset's path, for `render --preset` |
+| Load 2, Sync+shift | Print every live parameter as the flags that reproduce it |
+
+The crossfader is the binding the device is shaped for. The four htdemucs stems
+sum back to the original track, so an equal mix is the untouched audio and the
+two ends are the rhythm section and the melody — and the device happens to have
+buttons named Acapella and Instrumental sitting on the same axis. Stem controls
+need separated stems: without them they warn once and go inert, since
+separation takes several times the track's length and cannot happen mid-frame.
+
+### What it does not do
+
+**The controller moves the preview, not the render.** There is no performance
+recording yet, so a look you find with the knobs does not reach the mp4 by
+itself — print the state and pass the flags to `render`. This follows what the
+arrow keys already did: the preview says `[off schedule]` in its title bar when
+it has stopped showing what the render would, and never diverges silently.
+
+**The crossfader cannot blend two presets.** libprojectM 4.2 can cut or
+cross-transition on a timer; it has no blend position to scrub. A real A/B
+preset mix needs a second projectM instance and a composite pass, which would
+roughly double the 2.2 ms render cost.
+
+Preset changes from any control are rate-limited to the plan's own minimum
+switch gap. Pads that cut presets are how you build a strobe by accident, and
+the limiter is cheaper than the mistake.
+
+### If the numbers are wrong
+
+There is no official Numark MIDI implementation chart for the MixTrack Go. The
+shipped profile's addresses come from the community Mixxx mapping
+(`josefveiga/Numark-Mixtrack-Go-mapping-for-Mixxx`, upstream PR #16813),
+cross-checked against the Mixtrack Pro FX and Platinum FX maps, which share its
+conventions: deck N on channel N, pads on channels 5–6, browse and load on
+channel 16, jog rotation on CC `0x06`, 14-bit pitch on CC `0x09` + `0x29`.
+
+Two things only hardware settles. The jog may send ±1 per tick or a signed
+magnitude — the family disagrees with itself on whether `0x40` means +64 or
+−64. And not every button is known to send note-off. Run `midi-learn`, compare,
+and edit the profile; the plan at
+`docs/superpowers/plans/2026-11-10-midi-control-surface.md` has the checklist.
+
+Bluetooth needs no support code: pair the controller in Audio MIDI Setup and it
+appears as an ordinary CoreMIDI source.
+
 ## Testing
 
 ### Test fixtures

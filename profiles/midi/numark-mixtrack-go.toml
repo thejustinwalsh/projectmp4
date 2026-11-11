@@ -1,0 +1,162 @@
+# Numark MixTrack Go.
+#
+# Addresses verified against the community Mixxx mapping
+# (josefveiga/Numark-Mixtrack-Go-mapping-for-Mixxx, mixxxdj/mixxx PR #16813),
+# parsed from the file rather than copied from a summary, and cross-checked
+# against the Mixtrack Pro FX and Platinum FX maps, which share this device's
+# conventions: deck N on channel N, pads on channels 5-6, browse and load on
+# channel 16, jog rotation on CC 0x06, 14-bit pitch on CC 0x09 + 0x29.
+#
+# There is no official Numark MIDI implementation chart for this device. Nothing
+# below is confirmed against hardware. `projectmp4 midi-learn` prints what the
+# device actually sends; see docs/superpowers/plans/2026-11-10-midi-control-surface.md
+# for the calibration checklist.
+#
+# The hardware tracks MODE/SHIFT itself: holding it makes a button emit a
+# different note number, so there is no modifier state here to get wrong.
+#
+# Syntax: <status>:<number> = <verb> [arguments]
+#   Buttons fire on note-on with a non-zero velocity. Note-off is ignored.
+#   Absolute controls take the range to scale 0-127 into.
+#   A `-14` verb pairs an MSB address with an LSB one into a single 0-16383 value.
+
+name = "Numark MixTrack Go"
+
+# ---------------------------------------------------------------------------
+# Continuous controls
+#
+# Three parameters are worth a knob, and the device has more knobs than that,
+# so the rest are deliberately unbound rather than given busywork.
+# ---------------------------------------------------------------------------
+
+# Crossfader: what the visualiser listens to. Left is the rhythm section, right
+# is the melody, and the centre is the original mix, because the four htdemucs
+# stems sum back to the track. This is the binding the device is shaped for:
+# its Acapella and Instrumental buttons are the hard snaps of the same axis.
+0xBF:0x08 = stem-blend
+
+# Filter/Low knobs. Deck 1 drives how hard the visuals react (PCM gain into
+# projectM); deck 2 moves projectM's own beat sensitivity. Two different ways
+# to get a bigger reaction, which sound alike and look different.
+0xB0:0x1A = drive 0.0 2.0
+0xB1:0x1A = beat-sensitivity 0.0 5.0
+
+# Pitch faders, 14-bit: the same two parameters at 16384 steps instead of 128,
+# for setting a value you mean to keep rather than sweeping it.
+0xB0:0x09 = drive-14 msb 0.0 2.0
+0xB0:0x29 = drive-14 lsb
+0xB1:0x09 = beat-sensitivity-14 msb 0.0 5.0
+0xB1:0x29 = beat-sensitivity-14 lsb
+
+# ---------------------------------------------------------------------------
+# Preset selection
+#
+# One visualiser, two decks: deck 2 mirrors deck 1 rather than pretending to be
+# a second channel, so muscle memory works from either side.
+# ---------------------------------------------------------------------------
+
+# Jog wheels and the browse encoder all step through the pool. 242 ticks per
+# revolution makes the jog a fast scrub through presets and the encoder a slow,
+# detented one.
+0xB0:0x06 = step-preset relative
+0xB1:0x06 = step-preset relative
+0xBF:0x00 = step-preset relative
+
+# Pads jump straight to a pool slot. Deck 1 unshifted and shifted cover the
+# first eight; deck 2 unshifted covers the next four.
+0x94:0x14 = jump-preset 0
+0x94:0x15 = jump-preset 1
+0x94:0x16 = jump-preset 2
+0x94:0x17 = jump-preset 3
+0x94:0x1C = jump-preset 4
+0x94:0x1D = jump-preset 5
+0x94:0x1E = jump-preset 6
+0x94:0x1F = jump-preset 7
+0x95:0x14 = jump-preset 8
+0x95:0x15 = jump-preset 9
+0x95:0x16 = jump-preset 10
+0x95:0x17 = jump-preset 11
+
+# ---------------------------------------------------------------------------
+# Transport
+# ---------------------------------------------------------------------------
+
+0x90:0x00 = transport-toggle
+0x91:0x00 = transport-toggle
+
+# Cue nudges back ten seconds, which is the "play that again" gesture; shifted,
+# it goes forward by the same amount.
+0x90:0x01 = seek-by -10.0
+0x91:0x01 = seek-by -10.0
+0x90:0x05 = seek-by 10.0
+0x91:0x05 = seek-by 10.0
+
+# Sync rejoins the render's schedule after manual stepping has taken the
+# preview off it. The button's own name is already the right word for that.
+0x90:0x02 = resync
+0x91:0x02 = resync
+
+# ---------------------------------------------------------------------------
+# Stem snaps
+# ---------------------------------------------------------------------------
+
+# Acapella and Instrumental are the ends of the crossfader axis, reachable
+# without finding the fader. Shifted, either returns to the whole mix.
+0x90:0x46 = stem-snap vocals
+0x91:0x46 = stem-snap vocals
+0x90:0x48 = stem-snap instrumental
+0x91:0x48 = stem-snap instrumental
+0x90:0x47 = stem-snap all
+0x91:0x47 = stem-snap all
+0x90:0x49 = stem-snap all
+0x91:0x49 = stem-snap all
+
+# ---------------------------------------------------------------------------
+# State: lock, cut style, flash guard, and getting your settings back out
+# ---------------------------------------------------------------------------
+
+# Freeze what is on screen. The browse encoder's push is the natural place for
+# it: you stop browsing by pressing the thing you were browsing with.
+0x9F:0x07 = lock toggle
+0x90:0x04 = lock toggle
+0x91:0x04 = lock toggle
+
+# Fade FX switches preset changes between a soft transition and a hard cut.
+0x9F:0x46 = cut-style toggle
+
+# The flash guard, on a button you can hit without looking. Holding frame-to-frame
+# luminance under the WCAG 2.3.1 threshold costs contrast and beat response, so
+# it stays off by default -- but mashing pads to cut presets is exactly how you
+# make a strobe, and this is the way back.
+0x9F:0x47 = flash-guard toggle
+0x95:0x1C = flash-guard toggle
+
+0x95:0x1D = cut-style toggle
+0x95:0x1E = lock toggle
+
+# Print the current preset's path, to pin it with `render --preset`.
+0x90:0x1B = print-preset
+0x91:0x1B = print-preset
+0x9F:0x02 = print-preset
+
+# Print every live parameter as the flags that reproduce it. Without this the
+# preview is a place you find a look and then cannot say what it was: there is
+# no performance recording yet, so this is the only way out of the window.
+0x9F:0x03 = print-state
+0x95:0x1F = print-state
+0x90:0x03 = print-state
+0x91:0x03 = print-state
+
+# ---------------------------------------------------------------------------
+# Deliberately unbound
+#
+#   0x90/0x91:0x50, 0x80/0x81:0x50  jog touch (capacitive top)
+#   0xB0/0xB1:0x16                  channel faders
+#   0xBF:0x0A, 0xBF:0x0C            main level, cue level
+#   0x94/0x95:0x00                  pad Mode buttons (the device drives its own
+#                                   mode LEDs; nothing here needs the mode)
+#   0x9F:0x48, 0x9F:0x49            Load+shift (filter/low and vinyl-mode
+#                                   switches, which only matter to a DJ app)
+#
+# These are free addresses: add a line above and it binds.
+# ---------------------------------------------------------------------------
