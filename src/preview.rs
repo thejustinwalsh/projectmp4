@@ -234,30 +234,21 @@ impl PreviewState {
     }
 }
 
-/// What a key press asks the window to do. [`key_action`] decides; the window
-/// carries it out.
-#[derive(Debug, Clone, PartialEq)]
-pub enum KeyAction {
-    Quit,
-    Load(Load),
-    /// Print the current preset's path (so it can be pinned with `--preset`).
-    Print(PathBuf),
-    /// Lock changed; the value is the new state.
-    Lock(bool),
-    Ignored,
-}
+/// Old name for [`crate::control::Action`], kept so existing callers compile.
+pub use crate::control::Action as KeyAction;
+use crate::control::Action;
 
-pub fn key_action(code: KeyCode, state: &mut PreviewState) -> KeyAction {
+pub fn key_action(code: KeyCode, state: &mut PreviewState) -> Action {
     match code {
-        KeyCode::Escape => KeyAction::Quit,
-        KeyCode::ArrowRight => KeyAction::Load(state.next()),
-        KeyCode::ArrowLeft => KeyAction::Load(state.previous()),
+        KeyCode::Escape => Action::Quit,
+        KeyCode::ArrowRight => Action::Load(state.next()),
+        KeyCode::ArrowLeft => Action::Load(state.previous()),
         KeyCode::KeyL => {
             state.toggle_lock();
-            KeyAction::Lock(state.is_locked())
+            Action::Lock(state.is_locked())
         }
-        KeyCode::KeyP => KeyAction::Print(state.current().to_owned()),
-        _ => KeyAction::Ignored,
+        KeyCode::KeyP => Action::Print(state.current().to_owned()),
+        _ => Action::Ignored,
     }
 }
 
@@ -679,11 +670,25 @@ impl App<'_> {
 
     fn key(&mut self, code: KeyCode, el: &ActiveEventLoop) {
         match key_action(code, &mut self.state) {
-            KeyAction::Quit => el.exit(),
-            KeyAction::Load(l) => self.load(l),
-            KeyAction::Print(p) => println!("{}", p.display()),
-            KeyAction::Lock(on) => eprintln!("preview: {}", if on { "locked" } else { "unlocked" }),
-            KeyAction::Ignored => {}
+            Action::Quit => el.exit(),
+            Action::Load(l) => self.load(l),
+            Action::Print(p) => println!("{}", p.display()),
+            Action::Lock(on) => eprintln!("preview: {}", if on { "locked" } else { "unlocked" }),
+            Action::Ignored => {}
+            // Not wired yet: the controller work handles these. Listed so the
+            // compiler flags any verb added later without a home.
+            Action::StepPreset { .. }
+            | Action::JumpPreset { .. }
+            | Action::Resync
+            | Action::TransportToggle
+            | Action::SeekBy { .. }
+            | Action::CutStyle { .. }
+            | Action::StemBlend(_)
+            | Action::StemSnap(_)
+            | Action::Drive(_)
+            | Action::BeatSensitivity(_)
+            | Action::FlashGuard(_)
+            | Action::PrintState => {}
         }
     }
 }

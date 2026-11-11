@@ -6,5 +6,6 @@ pub use presets::Packs;
 pub mod render;
 pub mod encode;
 pub mod gl_overlay;
+pub mod control;
 pub mod preview;
 pub mod cli;
